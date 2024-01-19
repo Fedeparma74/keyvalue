@@ -1,0 +1,50 @@
+[package]
+name = "keyvalue"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# no-std
+core2 = { version = "0.4", default-features = false, optional = true }
+
+# async
+async-trait = { version = "0.1", optional = true }
+futures = { version = "0.3", default-features = false, features = [
+    "alloc",
+], optional = true }
+
+# database
+redb = { version = "1", optional = true }
+gloo-storage = { version = "0.3", optional = true }
+indexed-db = { version = "0.3", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+[features]
+default = ["std", "async"]
+
+std = []
+no-std = ["dep:core2"]
+
+async = ["async-trait", "dep:futures"]
+
+in-memory = ["std"]
+redb = ["std", "dep:redb"]
+local-storage = ["std", "dep:gloo-storage"]
+indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys"]
+
+test-no-std = ["no-std"]
+test = ["std", "async", "in-memory", "redb"]
+test-wasm = ["std", "async", "in-memory", "local-storage", "indexed-db"]
+
+[dev-dependencies]
+const_format = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+] }
+tempfile = "3"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
