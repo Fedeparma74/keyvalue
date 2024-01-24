@@ -67,12 +67,18 @@ impl AsyncKeyValueDB for IndexedDB {
                 .map_err(indexed_db_error_to_io_error)?;
         }
 
-        db.transaction(&[table_name])
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        let value = value.to_vec();
+        db.transaction(&[&table_name])
             .rw()
-            .run(|tx| async move {
-                let table = tx.object_store(table_name)?;
+            .run(move |tx| async move {
+                let table = tx.object_store(&table_name)?;
                 table
-                    .put_kv(&JsValue::from(key), &Uint8Array::from(value).into())
+                    .put_kv(
+                        &JsValue::from(key),
+                        &Uint8Array::from(value.as_ref()).into(),
+                    )
                     .await?;
                 Ok::<_, indexed_db::Error<()>>(())
             })
@@ -85,10 +91,12 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         let db = self.inner.lock().await;
 
+        let table_name = table_name.to_string();
+        let key = key.to_string();
         let value = match db
-            .transaction(&[table_name])
-            .run(|tx| async move {
-                let table = tx.object_store(table_name)?;
+            .transaction(&[&table_name])
+            .run(move |tx| async move {
+                let table = tx.object_store(&table_name)?;
                 let value = table.get(&JsValue::from(key)).await?;
                 Ok::<_, indexed_db::Error<()>>(value)
             })
@@ -131,11 +139,13 @@ impl AsyncKeyValueDB for IndexedDB {
                     .map_err(indexed_db_error_to_io_error)?;
             }
 
+            let table_name = table_name.to_string();
+            let key = key.to_string();
             if let Err(e) = db
-                .transaction(&[table_name])
+                .transaction(&[&table_name])
                 .rw()
-                .run(|tx| async move {
-                    let table = tx.object_store(table_name)?;
+                .run(move |tx| async move {
+                    let table = tx.object_store(&table_name)?;
                     table.delete(&JsValue::from(key)).await?;
                     Ok::<_, indexed_db::Error<()>>(())
                 })
@@ -158,10 +168,11 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         let db = self.inner.lock().await;
 
+        let table_name = table_name.to_string();
         let values = match db
-            .transaction(&[table_name])
-            .run(|tx| async move {
-                let table = tx.object_store(table_name)?;
+            .transaction(&[&table_name])
+            .run(move |tx| async move {
+                let table = tx.object_store(&table_name)?;
                 let mut key_values = Vec::new();
                 for key in table.get_all_keys(None).await? {
                     if let Some(value) = table.get(&key).await? {
@@ -222,10 +233,12 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
         let db = self.inner.lock().await;
 
+        let table_name = table_name.to_string();
+        let key = key.to_string();
         let contains_key = match db
-            .transaction(&[table_name])
-            .run(|tx| async move {
-                let table = tx.object_store(table_name)?;
+            .transaction(&[&table_name])
+            .run(move |tx| async move {
+                let table = tx.object_store(&table_name)?;
                 let contains_key = table.contains(&JsValue::from(key)).await?;
                 Ok::<_, indexed_db::Error<()>>(contains_key)
             })
@@ -248,10 +261,11 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
         let db = self.inner.lock().await;
 
+        let table_name = table_name.to_string();
         let keys = match db
-            .transaction(&[table_name])
-            .run(|tx| async move {
-                let table = tx.object_store(table_name)?;
+            .transaction(&[&table_name])
+            .run(move |tx| async move {
+                let table = tx.object_store(&table_name)?;
                 let mut keys = Vec::new();
                 for key in table.get_all_keys(None).await? {
                     keys.push(key.as_string().unwrap_or_default());
@@ -278,10 +292,11 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
         let db = self.inner.lock().await;
 
+        let table_name = table_name.to_string();
         let values = match db
-            .transaction(&[table_name])
-            .run(|tx| async move {
-                let table = tx.object_store(table_name)?;
+            .transaction(&[&table_name])
+            .run(move |tx| async move {
+                let table = tx.object_store(&table_name)?;
                 let mut values = Vec::new();
                 for value in table.get_all(None).await? {
                     values.push(Uint8Array::from(value).to_vec());
