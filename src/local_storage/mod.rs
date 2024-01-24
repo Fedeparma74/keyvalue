@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io,
-};
+use std::{collections::HashSet, io};
 
 use gloo_storage::{errors::StorageError, LocalStorage, Storage};
 
@@ -51,15 +48,32 @@ impl KeyValueDB for LocalStorageDB {
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
         let prefix = format!("{}/{}/", self.name, table_name);
 
-        let key_values = LocalStorage::get_all::<HashMap<String, Vec<u8>>>()
-            .map_err(storage_error_to_io_error)?
-            .into_iter()
-            .filter(|(key, _)| key.starts_with(&prefix))
-            .map(|(key, value)| {
+        let local_storage = LocalStorage::raw();
+        let length = LocalStorage::length();
+
+        let mut key_values = Vec::new();
+        for i in 0..length {
+            let key = local_storage
+                .key(i)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to get key at index {}: {:?}", i, e),
+                    )
+                })?
+                .unwrap_or_default();
+            if key.starts_with(&prefix) {
+                let value = LocalStorage::get::<Vec<u8>>(&key).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to get value for key {}: {:?}", key, e),
+                    )
+                })?;
                 let key = key.replacen(&format!("{}/{}/", self.name, table_name), "", 1);
-                (key, value)
-            })
-            .collect();
+
+                key_values.push((key, value));
+            }
+        }
 
         Ok(key_values)
     }
@@ -67,11 +81,20 @@ impl KeyValueDB for LocalStorageDB {
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
         let prefix = format!("{}/", self.name);
 
+        let local_storage = LocalStorage::raw();
+        let length = LocalStorage::length();
+
         let mut table_names = HashSet::new();
-        for entry in LocalStorage::get_all::<HashMap<String, Vec<u8>>>()
-            .map_err(storage_error_to_io_error)?
-        {
-            let (key, _) = entry;
+        for i in 0..length {
+            let key = local_storage
+                .key(i)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to get key at index {}: {:?}", i, e),
+                    )
+                })?
+                .unwrap_or_default();
             if key.starts_with(&prefix) {
                 let key = key.replacen(&format!("{}/", self.name), "", 1);
                 let key = key.split('/').next().unwrap_or_default();
@@ -86,13 +109,27 @@ impl KeyValueDB for LocalStorageDB {
     fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
         let prefix = format!("{}/{}", self.name, table_name);
 
-        for entry in LocalStorage::get_all::<HashMap<String, Vec<u8>>>()
-            .map_err(storage_error_to_io_error)?
-        {
-            let (key, _) = entry;
+        let local_storage = LocalStorage::raw();
+        let length = LocalStorage::length();
+
+        let mut keys_to_delete = Vec::new();
+        for i in 0..length {
+            let key = local_storage
+                .key(i)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to get key at index {}: {:?}", i, e),
+                    )
+                })?
+                .unwrap_or_default();
             if key.starts_with(&prefix) {
-                LocalStorage::delete(key);
+                keys_to_delete.push(key);
             }
+        }
+
+        for key in keys_to_delete {
+            LocalStorage::delete(key);
         }
 
         Ok(())
