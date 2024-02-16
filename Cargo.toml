@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # no-std
-core2 = { version = "0.4", default-features = false, optional = true }
+core2 = { version = "0.4", default-features = false }
 
 # async
 async-trait = { version = "0.1", optional = true }
@@ -23,7 +23,6 @@ js-sys = { version = "0.3", optional = true }
 default = ["std", "async"]
 
 std = []
-no-std = ["dep:core2"]
 
 async = ["async-trait", "dep:futures"]
 
@@ -32,7 +31,6 @@ redb = ["std", "dep:redb"]
 local-storage = ["std", "dep:gloo-storage"]
 indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys"]
 
-test-no-std = ["no-std"]
 test = ["std", "async", "in-memory", "redb"]
 test-wasm = ["std", "async", "in-memory", "local-storage", "indexed-db"]
 

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 
 use crate::kvdb::KeyValueDB;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKeyValueDB: Send + Sync {
     async fn insert(
         &self,
@@ -58,8 +58,8 @@ pub trait AsyncKeyValueDB: Send + Sync {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKeyValueDB for dyn KeyValueDB {
     async fn insert(
         &self,
@@ -106,8 +106,8 @@ impl AsyncKeyValueDB for dyn KeyValueDB {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<T: KeyValueDB> AsyncKeyValueDB for T {
     async fn insert(
         &self,
