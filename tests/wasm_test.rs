@@ -84,27 +84,28 @@ mod tests {
             .is_empty());
     }
 
-    // #[cfg(all(feature = "async", feature = "indexed-db"))]
-    // #[wasm_bindgen_test::wasm_bindgen_test]
-    // async fn test_async_indexed_db_in_worker() {
-    //     tokio_with_wasm::tokio::task::spawn_blocking(move || {
-    //         tokio_with_wasm::tokio::task::spawn(async move {
-    //             let name = "test_async_indexed_db_db";
-    //             let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
-    //             common::test_async_db(&db).await;
-    //             common::persist_test_data_async(Box::new(db)).await;
-    //             let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
-    //             common::check_test_data_async(&db).await;
-    //             assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-    //                 .await
-    //                 .unwrap()
-    //                 .is_empty());
-    //             keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-    //             assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-    //                 .await
-    //                 .unwrap()
-    //                 .is_empty());
-    //         })
-    //     });
-    // }
+    #[cfg(all(feature = "async", feature = "indexed-db"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_indexed_db_in_worker() {
+        wasmt::task::spawn(async move {
+            let name = "test_async_indexed_db_in_worker_db";
+            let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
+            common::test_async_db(&db).await;
+            common::persist_test_data_async(Box::new(db)).await;
+            let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
+            common::check_test_data_async(&db).await;
+            assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty());
+            keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
+            assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty());
+        })
+        .join()
+        .await
+        .unwrap();
+    }
 }
