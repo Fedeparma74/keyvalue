@@ -1,4 +1,5 @@
 use crate::io;
+#[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
 pub trait KeyValueDB: Send + Sync {
@@ -13,8 +14,13 @@ pub trait KeyValueDB: Send + Sync {
     #[allow(clippy::type_complexity)]
     fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;
-    fn delete_table(&self, table_name: &str) -> Result<(), io::Error>;
 
+    fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+        for (key, _) in self.iter(table_name)? {
+            self.remove(table_name, &key)?;
+        }
+        Ok(())
+    }
     #[allow(clippy::type_complexity)]
     fn iter_from_prefix(
         &self,

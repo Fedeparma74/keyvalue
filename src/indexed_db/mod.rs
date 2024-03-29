@@ -14,7 +14,7 @@ pub struct IndexedDB {
     inner: Mutex<Database<()>>,
 }
 
-// Safety: It is dafe to implement Send and Sync for IndexedDB because
+// Safety: It is safe to implement Send and Sync for IndexedDB because
 // it can only be used in a browser environment, that is single-threaded.
 unsafe impl Send for IndexedDB {}
 unsafe impl Sync for IndexedDB {}

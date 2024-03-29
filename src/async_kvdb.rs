@@ -1,4 +1,5 @@
 use crate::io;
+#[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 
 use async_trait::async_trait;
@@ -18,8 +19,13 @@ pub trait AsyncKeyValueDB: Send + Sync {
     async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     async fn table_names(&self) -> Result<Vec<String>, io::Error>;
-    async fn delete_table(&self, table_name: &str) -> Result<(), io::Error>;
 
+    async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+        for (key, _) in self.iter(table_name).await? {
+            self.remove(table_name, &key).await?;
+        }
+        Ok(())
+    }
     async fn iter_from_prefix(
         &self,
         table_name: &str,

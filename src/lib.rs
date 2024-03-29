@@ -21,6 +21,9 @@ pub mod in_memory;
 #[cfg(feature = "redb")]
 pub mod redb;
 
+#[cfg(feature = "aws-s3")]
+pub mod aws_s3;
+
 #[cfg(all(feature = "local-storage", target_arch = "wasm32"))]
 pub mod local_storage;
 

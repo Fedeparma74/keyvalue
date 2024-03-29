@@ -14,11 +14,34 @@ futures = { version = "0.3", default-features = false, features = [
 ], optional = true }
 
 # database
+aws-sdk-s3 = { version = "1", default-features = false, optional = true }
+aws-config = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+], optional = true }
+aws-credential-types = { version = "1", default-features = false, features = [
+    "hardcoded-credentials",
+], optional = true }
+aws-smithy-async = { version = "1", default-features = false, optional = true }
+aws-smithy-runtime-api = { version = "1", default-features = false, optional = true }
+reqwest = { version = "0.12", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redb = { version = "2", optional = true }
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-storage = { version = "0.3", optional = true }
 indexed-db = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
-console_error_panic_hook = { version = "0.1" }
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"], optional = true }
+gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+web-time = { version = "1", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [features]
 default = ["std", "async"]
@@ -29,11 +52,33 @@ async = ["async-trait", "dep:futures"]
 
 in-memory = ["std"]
 redb = ["std", "dep:redb"]
+aws-s3 = [
+    "std",
+    "async",
+    "dep:aws-sdk-s3",
+    "dep:aws-config",
+    "dep:aws-credential-types",
+    "dep:aws-smithy-async",
+    "dep:aws-smithy-runtime-api",
+    "dep:getrandom",
+    "dep:gloo-timers",
+    "dep:web-time",
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:wasm-bindgen-futures",
+]
 local-storage = ["std", "dep:gloo-storage"]
 indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys"]
 
-test = ["std", "async", "in-memory", "redb"]
-test-wasm = ["std", "async", "in-memory", "local-storage", "indexed-db"]
+test = ["std", "async", "in-memory", "redb", "aws-s3"]
+test-wasm = [
+    "std",
+    "async",
+    "in-memory",
+    "local-storage",
+    "indexed-db",
+    "aws-s3",
+]
 
 [dev-dependencies]
 const_format = "0.2"
