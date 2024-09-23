@@ -1,6 +1,7 @@
+#[cfg(all(feature = "test-wasm", target_arch = "wasm32"))]
 mod common;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "test-wasm", target_arch = "wasm32"))]
 mod tests {
     use super::common;
 

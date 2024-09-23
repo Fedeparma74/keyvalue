@@ -1,11 +1,9 @@
 use std::{io, path::Path};
 
-use redb::{
-    CommitError, Database, DatabaseError, ReadableTable, StorageError, TableDefinition, TableError,
-    TableHandle, TransactionError,
-};
+use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
 
-use crate::KeyValueDB;
+#[cfg(feature = "transactional")]
+mod transactional;
 
 #[derive(Debug)]
 pub struct RedbDB {
@@ -17,153 +15,6 @@ impl RedbDB {
         let inner = Database::create(path).map_err(database_error_to_io_error)?;
 
         Ok(Self { inner })
-    }
-}
-
-impl KeyValueDB for RedbDB {
-    fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let write_transaction = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        let old_value = {
-            let mut table = write_transaction
-                .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
-                .map_err(table_error_to_io_error)?;
-            let old = table
-                .insert(key, value)
-                .map_err(storage_error_to_io_error)?
-                .map(|v| v.value().to_vec());
-
-            old
-        };
-        write_transaction
-            .commit()
-            .map_err(commit_error_to_io_error)?;
-
-        Ok(old_value)
-    }
-
-    fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let read_transaction = self
-            .inner
-            .begin_read()
-            .map_err(transaction_error_to_io_error)?;
-        let value = {
-            let table_res =
-                read_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
-            let table = match table_res {
-                Ok(table) => table,
-                Err(TableError::TableDoesNotExist(_)) => {
-                    return Ok(None);
-                }
-                Err(e) => return Err(table_error_to_io_error(e)),
-            };
-            let val = table
-                .get(key)
-                .map_err(storage_error_to_io_error)?
-                .map(|v| v.value().to_vec());
-
-            val
-        };
-
-        Ok(value)
-    }
-
-    fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let write_transaction = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        let old_value = {
-            let table_res =
-                write_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
-            let mut table = match table_res {
-                Ok(table) => Some(table),
-                Err(TableError::TableDoesNotExist(_)) => None,
-                Err(e) => return Err(table_error_to_io_error(e)),
-            };
-
-            if let Some(table) = table.as_mut() {
-                let old = table
-                    .remove(key)
-                    .map_err(storage_error_to_io_error)?
-                    .map(|v| v.value().to_vec());
-                old
-            } else {
-                None
-            }
-        };
-
-        if old_value.is_none() {
-            write_transaction
-                .abort()
-                .map_err(storage_error_to_io_error)?;
-        } else {
-            write_transaction
-                .commit()
-                .map_err(commit_error_to_io_error)?;
-        }
-
-        Ok(old_value)
-    }
-
-    fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-        let read_transaction = self
-            .inner
-            .begin_read()
-            .map_err(transaction_error_to_io_error)?;
-        let table_res =
-            read_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
-        let table = match table_res {
-            Ok(table) => table,
-            Err(TableError::TableDoesNotExist(_)) => {
-                return Ok(Vec::new());
-            }
-            Err(e) => return Err(table_error_to_io_error(e)),
-        };
-        let mut result = Vec::new();
-        for item in table.iter().map_err(storage_error_to_io_error)? {
-            let (key, value) = item.map_err(storage_error_to_io_error)?;
-            result.push((key.value().to_string(), value.value().to_vec()));
-        }
-        Ok(result)
-    }
-
-    fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        let read_transaction = self
-            .inner
-            .begin_read()
-            .map_err(transaction_error_to_io_error)?;
-        let mut result = Vec::new();
-        let tables_res = read_transaction.list_tables();
-        match tables_res {
-            Ok(tables) => {
-                for table_name in tables {
-                    result.push(table_name.name().to_string());
-                }
-            }
-            Err(StorageError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(storage_error_to_io_error(e));
-            }
-        }
-        Ok(result)
-    }
-
-    fn delete_table(&self, table_name: &str) -> io::Result<()> {
-        let write_transaction = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        write_transaction
-            .delete_table(TableDefinition::<&str, &[u8]>::new(table_name))
-            .map_err(table_error_to_io_error)?;
-        write_transaction
-            .commit()
-            .map_err(commit_error_to_io_error)?;
-
-        Ok(())
     }
 }
 

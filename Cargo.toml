@@ -49,6 +49,7 @@ default = ["std", "async"]
 std = []
 
 async = ["async-trait", "dep:futures"]
+transactional = []
 
 in-memory = ["std"]
 redb = ["std", "dep:redb"]
@@ -70,10 +71,11 @@ aws-s3 = [
 local-storage = ["std", "dep:gloo-storage"]
 indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys"]
 
-test = ["std", "async", "in-memory", "redb", "aws-s3"]
+test = ["std", "async", "transactional", "in-memory", "redb", "aws-s3"]
 test-wasm = [
     "std",
     "async",
+    "transactional",
     "in-memory",
     "local-storage",
     "indexed-db",

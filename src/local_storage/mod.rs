@@ -1,7 +1,11 @@
 use std::{collections::HashSet, io};
 
+#[cfg(feature = "async")]
+use async_trait::async_trait;
 use gloo_storage::{errors::StorageError, LocalStorage, Storage};
 
+#[cfg(feature = "async")]
+use crate::AsyncKeyValueDB;
 use crate::KeyValueDB;
 
 #[derive(Debug)]
@@ -19,7 +23,7 @@ impl LocalStorageDB {
 
 impl KeyValueDB for LocalStorageDB {
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let old_value = self.get(table_name, key)?;
+        let old_value = KeyValueDB::get(self, table_name, key)?;
 
         LocalStorage::set(format!("{}/{}/{}", self.name, table_name, key), value)
             .map_err(storage_error_to_io_error)?;
@@ -36,7 +40,7 @@ impl KeyValueDB for LocalStorageDB {
     }
 
     fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        if let Some(old_value) = self.get(table_name, key)? {
+        if let Some(old_value) = KeyValueDB::get(self, table_name, key)? {
             LocalStorage::delete(format!("{}/{}/{}", self.name, table_name, key));
 
             Ok(Some(old_value))
@@ -139,6 +143,68 @@ impl KeyValueDB for LocalStorageDB {
         LocalStorage::clear();
 
         Ok(())
+    }
+}
+
+#[cfg(feature = "async")]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+impl AsyncKeyValueDB for LocalStorageDB {
+    async fn insert(
+        &self,
+        table_name: &str,
+        key: &str,
+        value: &[u8],
+    ) -> Result<Option<Vec<u8>>, io::Error> {
+        KeyValueDB::insert(self, table_name, key, value)
+    }
+
+    async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        KeyValueDB::get(self, table_name, key)
+    }
+
+    async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        KeyValueDB::remove(self, table_name, key)
+    }
+
+    async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        KeyValueDB::iter(self, table_name)
+    }
+
+    async fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        KeyValueDB::table_names(self)
+    }
+
+    async fn iter_from_prefix(
+        &self,
+        table_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        KeyValueDB::iter_from_prefix(self, table_name, prefix)
+    }
+
+    async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
+        KeyValueDB::contains_table(self, table_name)
+    }
+
+    async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
+        KeyValueDB::contains_key(self, table_name, key)
+    }
+
+    async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
+        KeyValueDB::keys(self, table_name)
+    }
+
+    async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
+        KeyValueDB::values(self, table_name)
+    }
+
+    async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+        KeyValueDB::delete_table(self, table_name)
+    }
+
+    async fn clear(&self) -> Result<(), io::Error> {
+        KeyValueDB::clear(self)
     }
 }
 

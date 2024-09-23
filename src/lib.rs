@@ -7,6 +7,12 @@ use core2::io;
 #[cfg(feature = "std")]
 use std::io;
 
+#[cfg(feature = "transactional")]
+mod transactional;
+
+#[cfg(feature = "transactional")]
+pub use transactional::*;
+
 #[cfg(feature = "async")]
 mod async_kvdb;
 mod kvdb;
