@@ -9,9 +9,7 @@ core2 = { version = "0.4", default-features = false }
 
 # async
 async-trait = { version = "0.1", optional = true }
-futures = { version = "0.3", default-features = false, features = [
-    "alloc",
-], optional = true }
+futures = { version = "0.3", default-features = false, features = ["std"]}
 
 # database
 aws-sdk-s3 = { version = "1", default-features = false, optional = true }
@@ -24,6 +22,8 @@ aws-credential-types = { version = "1", default-features = false, features = [
 aws-smithy-async = { version = "1", default-features = false, optional = true }
 aws-smithy-runtime-api = { version = "1", default-features = false, optional = true }
 reqwest = { version = "0.12", optional = true }
+tracing-subscriber = "0.3.19"
+tracing = "0.1.41"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redb = { version = "2", optional = true }
@@ -44,11 +44,11 @@ web-time = { version = "1", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [features]
-default = ["std", "async"]
+default = ["std", "async", "indexed-db", "in-memory", "redb"]
 
 std = []
 
-async = ["async-trait", "dep:futures"]
+async = ["async-trait"]
 
 in-memory = ["std"]
 redb = ["std", "dep:redb"]

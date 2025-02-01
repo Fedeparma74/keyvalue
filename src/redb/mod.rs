@@ -1,47 +1,172 @@
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Mutex};
 
+use futures::channel::mpsc::UnboundedSender;
 use redb::{
     CommitError, Database, DatabaseError, ReadableTable, StorageError, TableDefinition, TableError,
     TableHandle, TransactionError,
 };
 
-use crate::KeyValueDB;
+use crate::{KeyValueDB, RunBackupEvent, TABLE_VERSIONS};
 
 #[derive(Debug)]
 pub struct RedbDB {
     inner: Database,
+    backup_notifier_sender: Mutex<Option<UnboundedSender<RunBackupEvent>>>,
 }
 
 impl RedbDB {
     pub fn open(path: &Path) -> io::Result<Self> {
         let inner = Database::create(path).map_err(database_error_to_io_error)?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            backup_notifier_sender: Mutex::new(None),
+        })
     }
 }
 
 impl KeyValueDB for RedbDB {
+    fn add_backup_notifier_sender(&self, sender: UnboundedSender<RunBackupEvent>) {
+        self.backup_notifier_sender.lock().unwrap().replace(sender);
+    }
+
+    fn restore_backup(
+        &self,
+        table_name: &str,
+        data: Vec<(String, Vec<u8>)>,
+        new_version: u32,
+    ) -> io::Result<()> {
+        self.delete_table(table_name)?; // do it in a single tx?
+
+        let write_transaction = self
+            .inner
+            .begin_write()
+            .map_err(transaction_error_to_io_error)?;
+        {
+            let mut table = write_transaction
+                .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
+                .map_err(table_error_to_io_error)?;
+
+            for (key, value) in data {
+                table
+                    .insert(&*key, &*value)
+                    .map_err(storage_error_to_io_error)?;
+            }
+        }
+        write_transaction
+            .commit()
+            .map_err(commit_error_to_io_error)?;
+
+        let versions_write_transaction = self
+            .inner
+            .begin_write()
+            .map_err(transaction_error_to_io_error)?;
+        {
+            let mut version_table = versions_write_transaction
+                .open_table(TableDefinition::<&str, u32>::new(TABLE_VERSIONS))
+                .map_err(table_error_to_io_error)?;
+
+            version_table
+                .insert(table_name, &new_version)
+                .map_err(storage_error_to_io_error)?;
+        }
+        versions_write_transaction
+            .commit()
+            .map_err(commit_error_to_io_error)?;
+
+        println!(
+            "Backup for table {} restored with version {}",
+            table_name, new_version
+        );
+        Ok(())
+    }
+
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
         let write_transaction = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
-        let old_value = {
+
+        let (old_value, new_version) = {
             let mut table = write_transaction
                 .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
                 .map_err(table_error_to_io_error)?;
+
+            let mut version_table = write_transaction
+                .open_table(TableDefinition::<&str, u32>::new(TABLE_VERSIONS))
+                .map_err(table_error_to_io_error)?;
+
+            let current_version =  version_table
+                .get(table_name)
+                .map_err(storage_error_to_io_error)?
+                .map(|v| v.value())
+                .unwrap_or(0_u32);
+        
+            let new_version = current_version + 1;
+       
             let old = table
                 .insert(key, value)
                 .map_err(storage_error_to_io_error)?
                 .map(|v| v.value().to_vec());
 
-            old
+            version_table
+                .insert(table_name, new_version)
+                .map_err(storage_error_to_io_error)?;
+
+            (old, new_version)
         };
+
         write_transaction
             .commit()
             .map_err(commit_error_to_io_error)?;
 
+        let read_transaction = self.inner.begin_read().unwrap();
+        let version_table = read_transaction
+            .open_table(TableDefinition::<&str, u32>::new(TABLE_VERSIONS))
+            .unwrap();
+        let version = version_table.get(table_name).unwrap();
+
+        let sender = self.backup_notifier_sender.lock().unwrap();
+        if let Some(sender) = sender.as_ref() {
+            match sender.unbounded_send(RunBackupEvent::Insert((
+                table_name.to_string(),
+                new_version,
+            ))) {
+                Ok(_) => {
+                }
+                Err(err) => {
+                    println!("Error sending backup event: {:#?}", err);
+                }
+            }
+        }
+
         Ok(old_value)
+    }
+
+    // Method to get the current version of a table
+    fn get_table_version(&self, table_name: &str) -> io::Result<Option<u32>> {
+        let read_transaction = self
+            .inner
+            .begin_read()
+            .map_err(transaction_error_to_io_error)?;
+
+        let version_table = match read_transaction
+            .open_table(TableDefinition::<&str, u32>::new(TABLE_VERSIONS))
+        {
+            Ok(table) => table,
+            Err(err) => {
+                println!("Error opening table_versions table: {:#?}", err);
+                return Ok(None);
+            }
+        };
+        println!("printing versions table {:?}", version_table);
+
+        let version = version_table
+            .get(table_name)
+            .map_err(storage_error_to_io_error)?
+            .map(|v| v.value());
+
+        Ok(version)
     }
 
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
@@ -103,6 +228,13 @@ impl KeyValueDB for RedbDB {
             write_transaction
                 .commit()
                 .map_err(commit_error_to_io_error)?;
+        }
+        let sender = self.backup_notifier_sender.lock().unwrap();
+        if let Some(sender) = sender.as_ref() {
+            match sender.unbounded_send(RunBackupEvent::Delete((table_name.to_string(), 0))) {
+                Ok(_) => {}
+                Err(_) => {}
+            }
         }
 
         Ok(old_value)

@@ -1,14 +1,18 @@
-use crate::io;
+use crate::{io, RunBackupEvent};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 
 use async_trait::async_trait;
+use futures::channel::mpsc::UnboundedSender;
 
 use crate::kvdb::KeyValueDB;
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKeyValueDB: Send + Sync {
+    async fn restore_backup(&self, table_name: &str, data: Vec<(String,Vec<u8>)>, new_version: u32) -> Result<(), io::Error>;
+    async fn add_backup_notifier_sender(&self, sender: UnboundedSender<RunBackupEvent>);
+    async fn get_table_version(&self, table_name: &str) -> io::Result<Option<u32>>;
     async fn insert(
         &self,
         table_name: &str,
@@ -67,6 +71,16 @@ pub trait AsyncKeyValueDB: Send + Sync {
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKeyValueDB for dyn KeyValueDB {
+    async fn restore_backup(&self, table_name: &str, data: Vec<(String,Vec<u8>)>, new_version: u32) -> Result<(), io::Error> {
+        KeyValueDB::restore_backup(self, table_name, data, new_version)
+    }
+    async fn add_backup_notifier_sender(&self, sender: UnboundedSender<RunBackupEvent>) {
+        KeyValueDB::add_backup_notifier_sender(self, sender)
+    }
+    async fn get_table_version(&self, table_name: &str) -> io::Result<Option<u32>> {
+        KeyValueDB::get_table_version(self, table_name)
+    }
+
     async fn insert(
         &self,
         table_name: &str,
@@ -115,6 +129,16 @@ impl AsyncKeyValueDB for dyn KeyValueDB {
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<T: KeyValueDB> AsyncKeyValueDB for T {
+    async fn restore_backup(&self, table_name: &str, data: Vec<(String,Vec<u8>)>, new_version: u32) -> Result<(), io::Error> {
+        KeyValueDB::restore_backup(self, table_name, data, new_version)
+    }
+    async fn add_backup_notifier_sender(&self, sender: UnboundedSender<RunBackupEvent>) {
+        KeyValueDB::add_backup_notifier_sender(self, sender)
+    }
+    async fn get_table_version(&self, table_name: &str) -> io::Result<Option<u32>> {
+        KeyValueDB::get_table_version(self, table_name)
+    }
+    
     async fn insert(
         &self,
         table_name: &str,

@@ -29,3 +29,5 @@ pub mod local_storage;
 
 #[cfg(all(feature = "indexed-db", target_arch = "wasm32"))]
 pub mod indexed_db;
+
+pub static TABLE_VERSIONS: &str = "table_versions";

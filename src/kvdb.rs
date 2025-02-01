@@ -1,8 +1,19 @@
+use futures::channel::mpsc::UnboundedSender;
+
 use crate::io;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+#[derive(Debug, Clone)]
+pub enum RunBackupEvent {
+    Insert((String, u32)),
+    Delete((String, u32)),
+}
+
 pub trait KeyValueDB: Send + Sync {
+    fn restore_backup(&self, table_name: &str, data: Vec<(String,Vec<u8>)>, new_version: u32) -> Result<(), io::Error>;
+    fn add_backup_notifier_sender(&self, sender: UnboundedSender<RunBackupEvent>);
+    fn get_table_version(&self, table_name: &str) -> io::Result<Option<u32>>;
     fn insert(
         &self,
         table_name: &str,

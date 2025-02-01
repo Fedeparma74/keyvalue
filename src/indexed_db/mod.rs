@@ -1,17 +1,18 @@
 use std::{io, sync::atomic::AtomicU32};
 
 use async_trait::async_trait;
-use futures::lock::Mutex;
+use futures::{channel::mpsc::UnboundedSender, lock::Mutex};
 use indexed_db::{Database, Factory};
 use js_sys::{wasm_bindgen::JsValue, Uint8Array};
 
-use crate::AsyncKeyValueDB;
+use crate::{AsyncKeyValueDB, RunBackupEvent, TABLE_VERSIONS};
 
 #[derive(Debug)]
 pub struct IndexedDB {
     name: String,
     version: AtomicU32,
     inner: Mutex<Database<()>>,
+    backup_notifier_sender: Mutex<Option<UnboundedSender<RunBackupEvent>>>,
 }
 
 // Safety: It is safe to implement Send and Sync for IndexedDB because
@@ -31,12 +32,157 @@ impl IndexedDB {
             name: db_name.to_string(),
             version: AtomicU32::new(db.version()),
             inner: Mutex::new(db),
+            backup_notifier_sender: Mutex::new(None),
         })
     }
 }
 
 #[async_trait(?Send)]
 impl AsyncKeyValueDB for IndexedDB {
+    async fn add_backup_notifier_sender(&self, sender: UnboundedSender<RunBackupEvent>) {
+        self.backup_notifier_sender.lock().await.replace(sender);
+    }
+
+    async fn get_table_version(&self, table_name: &str) -> io::Result<Option<u32>> {
+        let db = self.inner.lock().await;
+
+        let table_name = table_name.to_string();
+        let value = match db
+            .transaction(&[TABLE_VERSIONS])
+            .run(move |tx| async move {
+                let table = tx.object_store(TABLE_VERSIONS)?;
+                let value = table.get(&JsValue::from(table_name)).await?;
+                Ok::<_, indexed_db::Error<()>>(value)
+            })
+            .await
+            .map_err(indexed_db_error_to_io_error)
+        {
+            Ok(Some(value)) => value.as_f64().unwrap_or(0.0) as u32,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    return Ok(None);
+                } else {
+                    return Err(e);
+                }
+            }
+            Ok(None) => 0_u32,
+        };
+
+        Ok(Some(value))
+    }
+
+    async fn restore_backup(
+        &self,
+        table_name: &str,
+        data: Vec<(String, Vec<u8>)>,
+        new_version: u32,
+    ) -> io::Result<()> {
+        let table_name_str = table_name.to_string();
+        let table_name_str_clone = table_name_str.clone();
+
+        // Delete the existing table
+        self.delete_table(table_name).await?;
+
+        // Increment the version counter only once
+        let new_version_indexdb_version = self
+            .version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+
+        // Lock the database and perform operations
+        let mut db = self.inner.lock().await;
+
+        // Reopen the database with the new version
+        db.close();
+        *db = Factory::get()
+            .map_err(indexed_db_error_to_io_error)?
+            .open(
+                &self.name,
+                new_version_indexdb_version,
+                move |evt| async move {
+                    let db = evt.database();
+                    db.build_object_store(&table_name_str).create()?;
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(indexed_db_error_to_io_error)?;
+
+        // Insert the backup data into the table
+        for (key, value) in data {
+            let table_name_str = table_name.to_string();
+
+            db.transaction(&[&table_name_str])
+                .rw()
+                .run(move |tx| async move {
+                    let table = tx.object_store(&table_name_str)?;
+                    table
+                        .put_kv(
+                            &JsValue::from(key),
+                            &Uint8Array::from(value.as_ref()).into(),
+                        )
+                        .await?;
+                    Ok::<_, indexed_db::Error<()>>(())
+                })
+                .await
+                .map_err(indexed_db_error_to_io_error)?;
+        }
+
+        // Check if the `table_versions` object store exists
+        let new_version_indexdb_version = self
+            .version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let version_table_name = TABLE_VERSIONS.to_string();
+        let version_table_name_clone = version_table_name.clone();
+        if !db
+            .object_store_names()
+            .into_iter()
+            .any(|n| n == TABLE_VERSIONS)
+        {
+            tracing::info!("Creating table_versions object store");
+
+            db.close();
+            *db = Factory::get()
+                .map_err(indexed_db_error_to_io_error)?
+                .open(
+                    &self.name,
+                    new_version_indexdb_version,
+                    move |evt| async move {
+                        let db = evt.database();
+                        db.build_object_store(&version_table_name).create()?;
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(indexed_db_error_to_io_error)?;
+        }
+
+        // Update the version in the `table_versions` object store
+        db.transaction(&[&version_table_name_clone])
+            .rw()
+            .run(move |tx| async move {
+                let table = tx.object_store(&version_table_name_clone)?;
+                table
+                    .put_kv(
+                        &JsValue::from(table_name_str_clone),
+                        &Uint8Array::from(new_version.to_be_bytes().as_ref()).into(),
+                    )
+                    .await?;
+                Ok::<_, indexed_db::Error<()>>(())
+            })
+            .await
+            .map_err(indexed_db_error_to_io_error)?;
+            
+        tracing::info!(
+            "Backup for table {} restored with version {}",
+            table_name,
+            new_version
+        );
+
+        Ok(())
+    }
+
     async fn insert(
         &self,
         table_name: &str,
@@ -44,30 +190,41 @@ impl AsyncKeyValueDB for IndexedDB {
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
         let old_value = self.get(table_name, key).await?;
-
+        let new_version_indexdb_version = self
+            .version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let mut db = self.inner.lock().await;
-
+        tracing::info!(
+            "Inserting into table {} with key {} for indexdb version {}",
+            table_name,
+            key,
+            new_version_indexdb_version
+        );
         if !db.object_store_names().into_iter().any(|n| n == table_name) {
             db.close();
 
             let table_name_str = table_name.to_string();
-            let new_version = self
-                .version
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
 
             *db = Factory::get()
                 .map_err(indexed_db_error_to_io_error)?
-                .open(&self.name, new_version, move |evt| async move {
-                    let db = evt.database();
-                    db.build_object_store(&table_name_str).create()?;
-                    Ok(())
-                })
+                .open(
+                    &self.name,
+                    new_version_indexdb_version,
+                    move |evt| async move {
+                        let db = evt.database();
+                        db.build_object_store(&table_name_str).create()?;
+                        Ok(())
+                    },
+                )
                 .await
                 .map_err(indexed_db_error_to_io_error)?;
         }
 
         let table_name = table_name.to_string();
+        let table_name_clone = table_name.to_string().clone();
+        let table_name_clone2 = table_name.to_string().clone();
+
         let key = key.to_string();
         let value = value.to_vec();
         db.transaction(&[&table_name])
@@ -84,6 +241,95 @@ impl AsyncKeyValueDB for IndexedDB {
             })
             .await
             .map_err(indexed_db_error_to_io_error)?;
+
+        // check if version_table exists
+
+        if !db
+            .object_store_names()
+            .into_iter()
+            .any(|n| n == TABLE_VERSIONS)
+        {
+            db.close();
+            tracing::info!("Creating table_versions object store");
+            let new_version_indexdb_version = self
+                .version
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let table_name_str = TABLE_VERSIONS.to_string();
+
+            *db = Factory::get()
+                .map_err(indexed_db_error_to_io_error)?
+                .open(
+                    &self.name,
+                    new_version_indexdb_version,
+                    move |evt| async move {
+                        let db = evt.database();
+                        db.build_object_store(&table_name_str).create()?;
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(indexed_db_error_to_io_error)?;
+        }
+
+        let version_table_name = TABLE_VERSIONS.to_string();
+        let task_version_table_name = version_table_name.clone();
+        let value = match db
+            .transaction(&[&version_table_name])
+            .run(move |tx| async move {
+                let table = tx.object_store(&task_version_table_name)?;
+                let value = table.get(&JsValue::from(table_name_clone)).await?;
+                Ok::<_, indexed_db::Error<()>>(value)
+            })
+            .await
+            .map_err(indexed_db_error_to_io_error)
+        {
+            Ok(Some(value)) => {
+                let value = Uint8Array::from(value).to_vec();
+                u32::from_be_bytes(value.as_slice().try_into().unwrap())
+            }
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    tracing::info!("Table version not found, setting to 0");
+                    0_u32
+                } else {
+                    tracing::error!("Error getting table version: {:?}", e);
+                    return Err(e);
+                }
+            }
+            Ok(None) => 0_u32,
+        };
+
+        let new_version = value + 1;
+        tracing::info!(
+            "Inserting into table_versions with key {} for table version {}",
+            table_name_clone2,
+            new_version
+        );
+        let table_name_clone_3 = table_name_clone2.clone();
+        db.transaction(&[&version_table_name])
+            .rw()
+            .run(move |tx| async move {
+                let table = tx.object_store(&version_table_name)?;
+                table
+                    .put_kv(
+                        &JsValue::from(table_name_clone2),
+                        &Uint8Array::from(new_version.to_be_bytes().as_ref()).into(),
+                    )
+                    .await?;
+                Ok::<_, indexed_db::Error<()>>(())
+            })
+            .await
+            .map_err(indexed_db_error_to_io_error)?;
+
+        let backup_notifier_sender = self.backup_notifier_sender.lock().await;
+        if let Some(sender) = &*backup_notifier_sender {
+            let event = RunBackupEvent::Insert((table_name_clone_3, new_version));
+            match sender.unbounded_send(event) {
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
 
         Ok(old_value)
     }
