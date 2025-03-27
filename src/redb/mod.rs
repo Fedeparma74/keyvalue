@@ -29,45 +29,38 @@ fn storage_error_to_io_error(e: StorageError) -> io::Error {
             io::ErrorKind::InvalidData,
             format!("Database is corrupted: {}", e),
         ),
-        StorageError::LockPoisoned(location) => io::Error::new(
-            io::ErrorKind::Other,
-            format!("Database lock is poisoned: {}", location),
-        ),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        StorageError::LockPoisoned(location) => {
+            io::Error::other(format!("Database lock is poisoned: {}", location))
+        }
+        e => io::Error::other(e),
     }
 }
 
 fn database_error_to_io_error(e: DatabaseError) -> io::Error {
     match e {
         DatabaseError::Storage(e) => storage_error_to_io_error(e),
-        DatabaseError::DatabaseAlreadyOpen => {
-            io::Error::new(io::ErrorKind::Other, "Database is already open")
+        DatabaseError::DatabaseAlreadyOpen => io::Error::other("Database is already open"),
+        DatabaseError::RepairAborted => io::Error::other("Database repair was aborted"),
+        DatabaseError::UpgradeRequired(version) => {
+            io::Error::other(format!("Database upgrade required to version {}", version))
         }
-        DatabaseError::RepairAborted => {
-            io::Error::new(io::ErrorKind::Other, "Database repair was aborted")
-        }
-        DatabaseError::UpgradeRequired(version) => io::Error::new(
-            io::ErrorKind::Other,
-            format!("Database upgrade required to version {}", version),
-        ),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }
 
 fn transaction_error_to_io_error(e: TransactionError) -> io::Error {
     match e {
         TransactionError::Storage(e) => storage_error_to_io_error(e),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }
 
 fn table_error_to_io_error(e: TableError) -> io::Error {
     match e {
         TableError::Storage(e) => storage_error_to_io_error(e),
-        TableError::TableAlreadyOpen(name, location) => io::Error::new(
-            io::ErrorKind::Other,
-            format!("Table {} is already open: {}", name, location),
-        ),
+        TableError::TableAlreadyOpen(name, location) => {
+            io::Error::other(format!("Table {} is already open: {}", name, location))
+        }
         TableError::TableDoesNotExist(name) => io::Error::new(
             io::ErrorKind::NotFound,
             format!("Table {} does not exist", name),
@@ -98,13 +91,13 @@ fn table_error_to_io_error(e: TableError) -> io::Error {
                 name, alignment, width
             ),
         ),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }
 
 fn commit_error_to_io_error(e: CommitError) -> io::Error {
     match e {
         CommitError::Storage(e) => storage_error_to_io_error(e),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }

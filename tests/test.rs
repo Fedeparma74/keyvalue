@@ -22,10 +22,12 @@ mod tests {
         common::test_async_db(&db).await;
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::in_memory::InMemoryDB::new();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "redb")]
@@ -53,15 +55,19 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::redb::RedbDB::open(&path).unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "transactional", feature = "redb"))]
@@ -75,19 +81,25 @@ mod tests {
         let db = keyvalue::redb::RedbDB::open(&path).unwrap();
         common::check_test_data(&db);
         let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
-        assert!(!keyvalue::KVReadTransaction::table_names(&read)
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
         let mut write = keyvalue::TransactionalKVDB::begin_write(&db).unwrap();
         keyvalue::KVWriteTransaction::clear(&mut write).unwrap();
-        assert!(keyvalue::KVReadTransaction::table_names(&write)
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&write)
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::KVWriteTransaction::commit(write).unwrap();
         let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
-        assert!(keyvalue::KVReadTransaction::table_names(&read)
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
@@ -103,30 +115,36 @@ mod tests {
         let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
             .await
             .unwrap();
-        assert!(!keyvalue::AsyncKVReadTransaction::table_names(&read)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
             .await
             .unwrap();
         keyvalue::AsyncKVWriteTransaction::clear(&mut write)
             .await
             .unwrap();
-        assert!(keyvalue::AsyncKVReadTransaction::table_names(&write)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&write)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKVWriteTransaction::commit(write)
             .await
             .unwrap();
         let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
             .await
             .unwrap();
-        assert!(keyvalue::AsyncKVReadTransaction::table_names(&read)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "async", feature = "aws-s3"))]
@@ -154,14 +172,18 @@ mod tests {
             .await
             .unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

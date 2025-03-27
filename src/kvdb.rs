@@ -1,6 +1,9 @@
 use crate::io;
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 pub trait KeyValueDB: Send + Sync + 'static {
     fn insert(

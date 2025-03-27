@@ -1,4 +1,4 @@
-use crate::{io, KeyValueDB};
+use crate::{KeyValueDB, io};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 

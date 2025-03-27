@@ -177,11 +177,12 @@ pub async fn test_async_db<D: keyvalue::AsyncKeyValueDB>(db: &D) {
     assert!(db.delete_table(table1).await.is_ok());
     assert!(db.get(table1, key1).await.unwrap().is_none());
     assert!(db.get(table1, key2).await.unwrap().is_none());
-    assert!(db
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(db.iter(table1).await.unwrap().is_empty());
     assert!(db.keys(table1).await.unwrap().is_empty());
     assert!(db.values(table1).await.unwrap().is_empty());
@@ -193,11 +194,12 @@ pub async fn test_async_db<D: keyvalue::AsyncKeyValueDB>(db: &D) {
 
     assert!(db.clear().await.is_ok());
     assert!(db.get(table2, key).await.unwrap().is_none());
-    assert!(db
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(db.iter(table2).await.unwrap().is_empty());
     assert!(db.keys(table1).await.unwrap().is_empty());
     assert!(db.values(table1).await.unwrap().is_empty());
@@ -418,11 +420,13 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
 
     let mut write = db.begin_write().await.unwrap();
     assert!(write.get(table1, key).await.unwrap().is_none());
-    assert!(write
-        .iter_from_prefix(table1, key)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        write
+            .iter_from_prefix(table1, key)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(write.iter(table1).await.unwrap().is_empty());
     assert!(write.remove(table1, key).await.unwrap().is_none());
     assert!(!write.contains_key(table1, key).await.unwrap());
@@ -536,11 +540,13 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     assert!(write.delete_table(table1).await.is_ok());
     assert!(write.get(table1, key1).await.unwrap().is_none());
     assert!(write.get(table1, key2).await.unwrap().is_none());
-    assert!(write
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        write
+            .iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(write.iter(table1).await.unwrap().is_empty());
     assert!(write.keys(table1).await.unwrap().is_empty());
     assert!(write.values(table1).await.unwrap().is_empty());
@@ -555,11 +561,12 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     let read = db.begin_read().await.unwrap();
     assert!(read.get(table1, key1).await.unwrap().is_none());
     assert!(read.get(table1, key2).await.unwrap().is_none());
-    assert!(read
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        read.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(read.iter(table1).await.unwrap().is_empty());
     assert!(read.keys(table1).await.unwrap().is_empty());
     assert!(read.values(table1).await.unwrap().is_empty());
@@ -572,11 +579,13 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     let mut write = db.begin_write().await.unwrap();
     assert!(write.clear().await.is_ok());
     assert!(write.get(table2, key).await.unwrap().is_none());
-    assert!(write
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        write
+            .iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(write.iter(table2).await.unwrap().is_empty());
     assert!(write.keys(table1).await.unwrap().is_empty());
     assert!(write.values(table1).await.unwrap().is_empty());
@@ -589,11 +598,12 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
 
     let read = db.begin_read().await.unwrap();
     assert!(read.get(table2, key).await.unwrap().is_none());
-    assert!(read
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        read.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(read.iter(table2).await.unwrap().is_empty());
     assert!(read.keys(table1).await.unwrap().is_empty());
     assert!(read.values(table1).await.unwrap().is_empty());
@@ -612,11 +622,12 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     assert!(read.get(table1, key1).await.unwrap().is_none());
     assert!(read.get(table1, key2).await.unwrap().is_none());
     assert!(read.get(table2, key).await.unwrap().is_none());
-    assert!(read
-        .iter_from_prefix(table1, prefix)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        read.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 pub fn persist_test_data(db: Box<dyn keyvalue::KeyValueDB>) {

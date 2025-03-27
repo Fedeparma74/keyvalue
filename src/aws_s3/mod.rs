@@ -3,7 +3,7 @@ use std::{collections::HashSet, io};
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
 pub use aws_credential_types::Credentials;
-use aws_sdk_s3::{operation::get_object::GetObjectError, primitives::ByteStream, Client};
+use aws_sdk_s3::{Client, operation::get_object::GetObjectError, primitives::ByteStream};
 
 use crate::AsyncKeyValueDB;
 
@@ -40,7 +40,7 @@ impl AwsS3DB {
             .list_buckets()
             .send()
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?
+            .map_err(|e| io::Error::other(format!("{:?}", e)))?
             .buckets
             .unwrap_or_default();
 
@@ -53,12 +53,7 @@ impl AwsS3DB {
                 .bucket(bucket_name)
                 .send()
                 .await
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to create bucket: {:?}", e),
-                    )
-                })?;
+                .map_err(|e| io::Error::other(format!("Failed to create bucket: {:?}", e)))?;
         }
 
         Ok(Self {
@@ -88,7 +83,7 @@ impl AsyncKeyValueDB for AwsS3DB {
             .body(ByteStream::from(value.to_vec()))
             .send()
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+            .map_err(|e| io::Error::other(format!("{:?}", e)))?;
 
         Ok(old_value)
     }
@@ -109,16 +104,12 @@ impl AsyncKeyValueDB for AwsS3DB {
                 if let Some(GetObjectError::NoSuchKey(_)) = e.as_service_error() {
                     return Ok(None);
                 } else {
-                    return Err(io::Error::new(io::ErrorKind::Other, format!("{:?}", e)));
+                    return Err(io::Error::other(format!("{:?}", e)));
                 }
             }
         };
 
-        let data = output
-            .body
-            .collect()
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let data = output.body.collect().await.map_err(io::Error::other)?;
 
         Ok(Some(data.to_vec()))
     }
@@ -134,7 +125,7 @@ impl AsyncKeyValueDB for AwsS3DB {
             .key(&table_key)
             .send()
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+            .map_err(|e| io::Error::other(format!("{:?}", e)))?;
 
         Ok(old_value)
     }
@@ -162,7 +153,7 @@ impl AsyncKeyValueDB for AwsS3DB {
             let output = list_objects
                 .send()
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+                .map_err(|e| io::Error::other(format!("{:?}", e)))?;
 
             for object in output.contents.unwrap_or_default() {
                 let key = object.key.unwrap_or_default();
@@ -205,7 +196,7 @@ impl AsyncKeyValueDB for AwsS3DB {
             let output = list_objects
                 .send()
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+                .map_err(|e| io::Error::other(format!("{:?}", e)))?;
 
             for object in output.contents.unwrap_or_default() {
                 if let Some(table_name) = object

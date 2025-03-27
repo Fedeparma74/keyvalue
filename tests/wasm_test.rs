@@ -25,10 +25,12 @@ mod tests {
         common::test_async_db(&db).await;
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::in_memory::InMemoryDB::new();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "local-storage")]
@@ -54,15 +56,19 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::local_storage::LocalStorageDB::open(name).unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "async", feature = "indexed-db"))]
@@ -74,15 +80,19 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(all(
@@ -101,15 +111,19 @@ mod tests {
             common::persist_test_data_async(Box::new(db)).await;
             let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
             common::check_test_data_async(&db).await;
-            assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-                .await
-                .unwrap()
-                .is_empty());
+            assert!(
+                !keyvalue::AsyncKeyValueDB::table_names(&db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
             keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-            assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-                .await
-                .unwrap()
-                .is_empty());
+            assert!(
+                keyvalue::AsyncKeyValueDB::table_names(&db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         })
         .join()
         .await
@@ -141,14 +155,18 @@ mod tests {
             .await
             .unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

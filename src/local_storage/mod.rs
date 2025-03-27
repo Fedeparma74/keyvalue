@@ -2,7 +2,7 @@ use std::{collections::HashSet, io};
 
 #[cfg(feature = "async")]
 use async_trait::async_trait;
-use gloo_storage::{errors::StorageError, LocalStorage, Storage};
+use gloo_storage::{LocalStorage, Storage, errors::StorageError};
 
 #[cfg(feature = "async")]
 use crate::AsyncKeyValueDB;
@@ -60,18 +60,12 @@ impl KeyValueDB for LocalStorageDB {
             let key = local_storage
                 .key(i)
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get key at index {}: {:?}", i, e),
-                    )
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
                 })?
                 .unwrap_or_default();
             if key.starts_with(&prefix) {
                 let value = LocalStorage::get::<Vec<u8>>(&key).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get value for key {}: {:?}", key, e),
-                    )
+                    io::Error::other(format!("Failed to get value for key {}: {:?}", key, e))
                 })?;
                 let key = key.replacen(&format!("{}/{}/", self.name, table_name), "", 1);
 
@@ -93,10 +87,7 @@ impl KeyValueDB for LocalStorageDB {
             let key = local_storage
                 .key(i)
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get key at index {}: {:?}", i, e),
-                    )
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
                 })?
                 .unwrap_or_default();
             if key.starts_with(&prefix) {
@@ -121,10 +112,7 @@ impl KeyValueDB for LocalStorageDB {
             let key = local_storage
                 .key(i)
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get key at index {}: {:?}", i, e),
-                    )
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
                 })?
                 .unwrap_or_default();
             if key.starts_with(&prefix) {
@@ -221,9 +209,9 @@ fn storage_error_to_io_error(e: StorageError) -> io::Error {
             } else if e.is_eof() {
                 io::Error::new(io::ErrorKind::UnexpectedEof, e.to_string())
             } else {
-                io::Error::new(io::ErrorKind::Other, e.to_string())
+                io::Error::other(e.to_string())
             }
         }
-        StorageError::JsError(e) => io::Error::new(io::ErrorKind::Other, e),
+        StorageError::JsError(e) => io::Error::other(e),
     }
 }

@@ -8,8 +8,8 @@ use redb::{
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
 use super::{
-    commit_error_to_io_error, storage_error_to_io_error, table_error_to_io_error,
-    transaction_error_to_io_error, RedbDB,
+    RedbDB, commit_error_to_io_error, storage_error_to_io_error, table_error_to_io_error,
+    transaction_error_to_io_error,
 };
 
 impl KVReadTransaction for ReadTransaction {

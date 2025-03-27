@@ -1,7 +1,7 @@
 [package]
 name = "keyvalue"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 # no-std
@@ -38,7 +38,7 @@ gloo-storage = { version = "0.3", optional = true }
 indexed-db = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.2", features = ["js"], optional = true }
+getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 web-time = { version = "1", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
