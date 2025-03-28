@@ -209,6 +209,385 @@ pub async fn test_async_db<D: keyvalue::AsyncKeyValueDB>(db: &D) {
     assert!(db.table_names().await.unwrap().is_empty());
 }
 
+#[cfg(feature = "versioned")]
+pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
+    let (table1, key, value) = TEST_DATA[0];
+
+    assert!(db.get(table1, key).unwrap().is_none());
+    assert!(db.iter_from_prefix(table1, key).unwrap().is_empty());
+    assert!(db.iter(table1).unwrap().is_empty());
+    assert!(db.remove(table1, key).unwrap().is_none());
+    assert!(!db.contains_key(table1, key).unwrap());
+    assert!(db.table_names().unwrap().is_empty());
+    assert!(db.keys(table1).unwrap().is_empty());
+    assert!(db.values(table1).unwrap().is_empty());
+
+    assert!(db.insert(table1, key, value, 1).unwrap().is_none());
+    assert_eq!(
+        db.get(table1, key).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.insert(table1, key, value, 2).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.get(table1, key).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 2,
+        })
+    );
+    assert!(db.update(table1, key, &[]).unwrap().is_some());
+    assert_eq!(
+        db.get(table1, key).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: vec![],
+            version: 3,
+        })
+    );
+
+    let prefix = TEST_PREFIX;
+    let (_, key1, value1) = TEST_DATA[1];
+    let (table1, key2, value2) = TEST_DATA[2];
+    assert_eq!(db.get(table1, key1).unwrap(), None);
+    assert_eq!(db.get(table1, key2).unwrap(), None);
+    assert!(db.update(table1, key1, value1).unwrap().is_none());
+    assert!(db.insert(table1, key2, value2, 100).unwrap().is_none());
+    assert_eq!(
+        db.get(table1, key1).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value1.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.get(table1, key2).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value2.to_vec(),
+            version: 100,
+        })
+    );
+    assert!(db.update(table1, key2, value2).unwrap().is_some());
+    let iter = db.iter_from_prefix(table1, prefix).unwrap();
+    assert!(iter.len() == 2);
+    assert!(iter.contains(&(
+        key1.to_string(),
+        keyvalue::VersionedObject {
+            value: value1.to_vec(),
+            version: 1,
+        }
+    )));
+    assert!(iter.contains(&(
+        key2.to_string(),
+        keyvalue::VersionedObject {
+            value: value2.to_vec(),
+            version: 101,
+        }
+    )));
+    let iter = db.iter(table1).unwrap();
+    assert!(iter.len() == 3);
+    assert!(iter.contains(&(
+        key.to_string(),
+        keyvalue::VersionedObject {
+            value: vec![],
+            version: 3,
+        }
+    )));
+    assert!(iter.contains(&(
+        key1.to_string(),
+        keyvalue::VersionedObject {
+            value: value1.to_vec(),
+            version: 1,
+        }
+    )));
+    assert!(iter.contains(&(
+        key2.to_string(),
+        keyvalue::VersionedObject {
+            value: value2.to_vec(),
+            version: 101,
+        }
+    )));
+    let keys = db.keys(table1).unwrap();
+    assert!(keys.len() == 3);
+    assert!(keys.contains(&key.to_string()));
+    assert!(keys.contains(&key1.to_string()));
+    assert!(keys.contains(&key2.to_string()));
+    let values = db.values(table1).unwrap();
+    assert!(values.len() == 3);
+    assert!(values.contains(&keyvalue::VersionedObject {
+        value: vec![],
+        version: 3,
+    }));
+    assert!(values.contains(&keyvalue::VersionedObject {
+        value: value1.to_vec(),
+        version: 1,
+    }));
+    assert!(values.contains(&keyvalue::VersionedObject {
+        value: value2.to_vec(),
+        version: 101,
+    }));
+    assert!(db.contains_key(table1, key).unwrap());
+    assert!(db.contains_key(table1, key1).unwrap());
+    assert!(db.contains_key(table1, key2).unwrap());
+    assert!(!db.contains_key(table1, "non-existent").unwrap());
+    assert_eq!(db.table_names().unwrap(), vec![table1.to_string()]);
+    let (table2, key, value) = TEST_DATA[3];
+    assert!(db.insert(table2, key, value, 1).unwrap().is_none());
+    assert_eq!(
+        db.get(table2, key).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.insert(table2, key, value, 2).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.get(table2, key).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 2,
+        })
+    );
+    assert!(db.delete_table(table1).is_ok());
+    assert!(db.get(table1, key1).unwrap().is_none());
+    assert!(db.get(table1, key2).unwrap().is_none());
+    assert!(db.iter_from_prefix(table1, prefix).unwrap().is_empty());
+    assert!(db.iter(table1).unwrap().is_empty());
+    assert!(db.keys(table1).unwrap().is_empty());
+    assert!(db.values(table1).unwrap().is_empty());
+    assert!(!db.contains_key(table1, key1).unwrap());
+    assert!(!db.contains_key(table1, key2).unwrap());
+    assert!(!db.contains_key(table1, "non-existent").unwrap());
+    assert_eq!(
+        db.get(table2, key).unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 2,
+        })
+    );
+    assert_eq!(db.table_names().unwrap(), vec![table2.to_string()]);
+    assert!(db.clear().is_ok());
+    assert!(db.get(table2, key).unwrap().is_none());
+    assert!(db.iter_from_prefix(table1, prefix).unwrap().is_empty());
+    assert!(db.iter(table2).unwrap().is_empty());
+    assert!(db.keys(table1).unwrap().is_empty());
+    assert!(db.values(table1).unwrap().is_empty());
+    assert!(!db.contains_key(table1, key1).unwrap());
+    assert!(!db.contains_key(table1, key2).unwrap());
+    assert!(!db.contains_key(table1, "non-existent").unwrap());
+    assert!(db.table_names().unwrap().is_empty());
+}
+
+#[cfg(all(feature = "async", feature = "versioned"))]
+pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: &D) {
+    let (table1, key, value) = TEST_DATA[0];
+
+    assert!(db.get(table1, key).await.unwrap().is_none());
+    assert!(db.iter_from_prefix(table1, key).await.unwrap().is_empty());
+    assert!(db.iter(table1).await.unwrap().is_empty());
+    assert!(db.remove(table1, key).await.unwrap().is_none());
+    assert!(!db.contains_key(table1, key).await.unwrap());
+    assert!(db.table_names().await.unwrap().is_empty());
+    assert!(db.keys(table1).await.unwrap().is_empty());
+    assert!(db.values(table1).await.unwrap().is_empty());
+
+    assert!(db.insert(table1, key, value, 1).await.unwrap().is_none());
+    assert_eq!(
+        db.get(table1, key).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.insert(table1, key, value, 2).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.get(table1, key).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 2,
+        })
+    );
+    assert!(db.update(table1, key, &[]).await.unwrap().is_some());
+    assert_eq!(
+        db.get(table1, key).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: vec![],
+            version: 3,
+        })
+    );
+
+    let prefix = TEST_PREFIX;
+    let (_, key1, value1) = TEST_DATA[1];
+    let (table1, key2, value2) = TEST_DATA[2];
+    assert_eq!(db.get(table1, key1).await.unwrap(), None);
+    assert_eq!(db.get(table1, key2).await.unwrap(), None);
+    assert!(db.update(table1, key1, value1).await.unwrap().is_none());
+    assert!(
+        db.insert(table1, key2, value2, 100)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.get(table1, key1).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value1.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.get(table1, key2).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value2.to_vec(),
+            version: 100,
+        })
+    );
+    assert!(db.update(table1, key2, value2).await.unwrap().is_some());
+    let iter = db.iter_from_prefix(table1, prefix).await.unwrap();
+    assert!(iter.len() == 2);
+    assert!(iter.contains(&(
+        key1.to_string(),
+        keyvalue::VersionedObject {
+            value: value1.to_vec(),
+            version: 1,
+        }
+    )));
+    assert!(iter.contains(&(
+        key2.to_string(),
+        keyvalue::VersionedObject {
+            value: value2.to_vec(),
+            version: 101,
+        }
+    )));
+    let iter = db.iter(table1).await.unwrap();
+    assert!(iter.len() == 3);
+    assert!(iter.contains(&(
+        key.to_string(),
+        keyvalue::VersionedObject {
+            value: vec![],
+            version: 3,
+        }
+    )));
+    assert!(iter.contains(&(
+        key1.to_string(),
+        keyvalue::VersionedObject {
+            value: value1.to_vec(),
+            version: 1,
+        }
+    )));
+    assert!(iter.contains(&(
+        key2.to_string(),
+        keyvalue::VersionedObject {
+            value: value2.to_vec(),
+            version: 101,
+        }
+    )));
+    let keys = db.keys(table1).await.unwrap();
+    assert!(keys.len() == 3);
+    assert!(keys.contains(&key.to_string()));
+    assert!(keys.contains(&key1.to_string()));
+    assert!(keys.contains(&key2.to_string()));
+    let values = db.values(table1).await.unwrap();
+    assert!(values.len() == 3);
+    assert!(values.contains(&keyvalue::VersionedObject {
+        value: vec![],
+        version: 3,
+    }));
+    assert!(values.contains(&keyvalue::VersionedObject {
+        value: value1.to_vec(),
+        version: 1,
+    }));
+    assert!(values.contains(&keyvalue::VersionedObject {
+        value: value2.to_vec(),
+        version: 101,
+    }));
+    assert!(db.contains_key(table1, key).await.unwrap());
+    assert!(db.contains_key(table1, key1).await.unwrap());
+    assert!(db.contains_key(table1, key2).await.unwrap());
+    assert!(!db.contains_key(table1, "non-existent").await.unwrap());
+    assert_eq!(db.table_names().await.unwrap(), vec![table1.to_string()]);
+    let (table2, key, value) = TEST_DATA[3];
+    assert!(db.insert(table2, key, value, 1).await.unwrap().is_none());
+    assert_eq!(
+        db.get(table2, key).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.insert(table2, key, value, 2).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 1,
+        })
+    );
+    assert_eq!(
+        db.get(table2, key).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 2,
+        })
+    );
+    assert!(db.delete_table(table1).await.is_ok());
+    assert!(db.get(table1, key1).await.unwrap().is_none());
+    assert!(db.get(table1, key2).await.unwrap().is_none());
+    assert!(
+        db.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(db.iter(table1).await.unwrap().is_empty());
+    assert!(db.keys(table1).await.unwrap().is_empty());
+    assert!(db.values(table1).await.unwrap().is_empty());
+    assert!(!db.contains_key(table1, key1).await.unwrap());
+    assert!(!db.contains_key(table1, key2).await.unwrap());
+    assert!(!db.contains_key(table1, "non-existent").await.unwrap());
+    assert_eq!(
+        db.get(table2, key).await.unwrap(),
+        Some(keyvalue::VersionedObject {
+            value: value.to_vec(),
+            version: 2,
+        })
+    );
+    assert_eq!(db.table_names().await.unwrap(), vec![table2.to_string()]);
+    assert!(db.clear().await.is_ok());
+    assert!(db.get(table2, key).await.unwrap().is_none());
+    assert!(
+        db.iter_from_prefix(table1, prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(db.iter(table2).await.unwrap().is_empty());
+    assert!(db.keys(table1).await.unwrap().is_empty());
+    assert!(db.values(table1).await.unwrap().is_empty());
+    assert!(!db.contains_key(table1, key1).await.unwrap());
+    assert!(!db.contains_key(table1, key2).await.unwrap());
+    assert!(!db.contains_key(table1, "non-existent").await.unwrap());
+    assert!(db.table_names().await.unwrap().is_empty());
+}
+
 #[cfg(feature = "transactional")]
 pub fn test_transactional_db<D: keyvalue::TransactionalKVDB>(db: &D) {
     use keyvalue::{KVReadTransaction, KVWriteTransaction};

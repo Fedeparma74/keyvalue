@@ -24,6 +24,7 @@ aws-credential-types = { version = "1", default-features = false, features = [
 aws-smithy-async = { version = "1", default-features = false, optional = true }
 aws-smithy-runtime-api = { version = "1", default-features = false, optional = true }
 reqwest = { version = "0.12", optional = true }
+bincode = { version = "2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redb = { version = "2", optional = true }
@@ -50,6 +51,7 @@ std = []
 
 async = ["async-trait", "dep:futures"]
 transactional = []
+versioned = ["dep:bincode"]
 
 in-memory = ["std"]
 redb = ["std", "dep:redb"]
@@ -71,11 +73,20 @@ aws-s3 = [
 local-storage = ["std", "dep:gloo-storage"]
 indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys"]
 
-test = ["std", "async", "transactional", "in-memory", "redb", "aws-s3"]
+test = [
+    "std",
+    "async",
+    "transactional",
+    "versioned",
+    "in-memory",
+    "redb",
+    "aws-s3",
+]
 test-wasm = [
     "std",
     "async",
     "transactional",
+    "versioned",
     "in-memory",
     "local-storage",
     "indexed-db",

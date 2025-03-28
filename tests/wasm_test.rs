@@ -33,6 +33,31 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "versioned", feature = "in-memory"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn test_versioned_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_versioned_db(&db);
+        common::persist_test_data(Box::new(db));
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(all(feature = "async", feature = "versioned", feature = "in-memory"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_versioned_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_versioned_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[cfg(feature = "local-storage")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn test_local_storage() {
