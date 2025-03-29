@@ -1,11 +1,12 @@
 use std::{io, path::Path};
 
-use redb::{
-    CommitError, Database, DatabaseError, ReadableTable, StorageError, TableDefinition, TableError,
-    TableHandle, TransactionError,
-};
+use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
+use redb::{ReadableTable, TableDefinition, TableHandle};
 
 use crate::KeyValueDB;
+
+#[cfg(feature = "transactional")]
+mod transactional;
 
 #[derive(Debug)]
 pub struct RedbDB {
@@ -30,12 +31,11 @@ impl KeyValueDB for RedbDB {
             let mut table = write_transaction
                 .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
                 .map_err(table_error_to_io_error)?;
-            let old = table
+
+            table
                 .insert(key, value)
                 .map_err(storage_error_to_io_error)?
-                .map(|v| v.value().to_vec());
-
-            old
+                .map(|v| v.value().to_vec())
         };
         write_transaction
             .commit()
@@ -59,12 +59,11 @@ impl KeyValueDB for RedbDB {
                 }
                 Err(e) => return Err(table_error_to_io_error(e)),
             };
-            let val = table
+
+            table
                 .get(key)
                 .map_err(storage_error_to_io_error)?
-                .map(|v| v.value().to_vec());
-
-            val
+                .map(|v| v.value().to_vec())
         };
 
         Ok(value)
@@ -85,11 +84,10 @@ impl KeyValueDB for RedbDB {
             };
 
             if let Some(table) = table.as_mut() {
-                let old = table
+                table
                     .remove(key)
                     .map_err(storage_error_to_io_error)?
-                    .map(|v| v.value().to_vec());
-                old
+                    .map(|v| v.value().to_vec())
             } else {
                 None
             }
@@ -178,45 +176,38 @@ fn storage_error_to_io_error(e: StorageError) -> io::Error {
             io::ErrorKind::InvalidData,
             format!("Database is corrupted: {}", e),
         ),
-        StorageError::LockPoisoned(location) => io::Error::new(
-            io::ErrorKind::Other,
-            format!("Database lock is poisoned: {}", location),
-        ),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        StorageError::LockPoisoned(location) => {
+            io::Error::other(format!("Database lock is poisoned: {}", location))
+        }
+        e => io::Error::other(e),
     }
 }
 
 fn database_error_to_io_error(e: DatabaseError) -> io::Error {
     match e {
         DatabaseError::Storage(e) => storage_error_to_io_error(e),
-        DatabaseError::DatabaseAlreadyOpen => {
-            io::Error::new(io::ErrorKind::Other, "Database is already open")
+        DatabaseError::DatabaseAlreadyOpen => io::Error::other("Database is already open"),
+        DatabaseError::RepairAborted => io::Error::other("Database repair was aborted"),
+        DatabaseError::UpgradeRequired(version) => {
+            io::Error::other(format!("Database upgrade required to version {}", version))
         }
-        DatabaseError::RepairAborted => {
-            io::Error::new(io::ErrorKind::Other, "Database repair was aborted")
-        }
-        DatabaseError::UpgradeRequired(version) => io::Error::new(
-            io::ErrorKind::Other,
-            format!("Database upgrade required to version {}", version),
-        ),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }
 
 fn transaction_error_to_io_error(e: TransactionError) -> io::Error {
     match e {
         TransactionError::Storage(e) => storage_error_to_io_error(e),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }
 
 fn table_error_to_io_error(e: TableError) -> io::Error {
     match e {
         TableError::Storage(e) => storage_error_to_io_error(e),
-        TableError::TableAlreadyOpen(name, location) => io::Error::new(
-            io::ErrorKind::Other,
-            format!("Table {} is already open: {}", name, location),
-        ),
+        TableError::TableAlreadyOpen(name, location) => {
+            io::Error::other(format!("Table {} is already open: {}", name, location))
+        }
         TableError::TableDoesNotExist(name) => io::Error::new(
             io::ErrorKind::NotFound,
             format!("Table {} does not exist", name),
@@ -247,13 +238,13 @@ fn table_error_to_io_error(e: TableError) -> io::Error {
                 name, alignment, width
             ),
         ),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }
 
 fn commit_error_to_io_error(e: CommitError) -> io::Error {
     match e {
         CommitError::Storage(e) => storage_error_to_io_error(e),
-        e => io::Error::new(io::ErrorKind::Other, e),
+        e => io::Error::other(e),
     }
 }

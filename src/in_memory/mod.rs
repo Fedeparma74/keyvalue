@@ -70,11 +70,6 @@ impl KeyValueDB for InMemoryDB {
         Ok(self.map.read().unwrap().keys().cloned().collect())
     }
 
-    fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        self.map.write().unwrap().remove(table_name);
-        Ok(())
-    }
-
     fn iter_from_prefix(
         &self,
         table_name: &str,
@@ -92,6 +87,10 @@ impl KeyValueDB for InMemoryDB {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
+        Ok(self.map.read().unwrap().contains_key(table_name))
     }
 
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
@@ -122,6 +121,11 @@ impl KeyValueDB for InMemoryDB {
             .get(table_name)
             .map(|map| map.values().cloned().collect())
             .unwrap_or_default())
+    }
+
+    fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+        self.map.write().unwrap().remove(table_name);
+        Ok(())
     }
 
     fn clear(&self) -> Result<(), io::Error> {

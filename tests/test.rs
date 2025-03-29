@@ -1,6 +1,7 @@
+#[cfg(all(feature = "test", not(target_arch = "wasm32")))]
 mod common;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "test", not(target_arch = "wasm32")))]
 mod tests {
     use super::common;
 
@@ -21,10 +22,37 @@ mod tests {
         common::test_async_db(&db).await;
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::in_memory::InMemoryDB::new();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(feature = "versioned", feature = "in-memory"))]
+    #[test]
+    fn test_versioned_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_versioned_db(&db);
+        common::persist_test_data(Box::new(db));
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(all(feature = "async", feature = "versioned", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_versioned_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_versioned_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(feature = "redb")]
@@ -52,15 +80,96 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::redb::RedbDB::open(&path).unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(feature = "transactional", feature = "redb"))]
+    #[test]
+    fn test_transactional_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_transactional_redb_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_transactional_db(&db);
+        common::persist_test_data(Box::new(db));
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::check_test_data(&db);
+        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+        assert!(
+            !keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = keyvalue::TransactionalKVDB::begin_write(&db).unwrap();
+        keyvalue::KVWriteTransaction::clear(&mut write).unwrap();
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&write)
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::KVWriteTransaction::commit(write).unwrap();
+        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_transactional_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_transactional_redb_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_transactional_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::check_test_data_async(&db).await;
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
             .await
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        assert!(
+            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
+            .await
+            .unwrap();
+        keyvalue::AsyncKVWriteTransaction::clear(&mut write)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&write)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKVWriteTransaction::commit(write)
+            .await
+            .unwrap();
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "async", feature = "aws-s3"))]
@@ -88,14 +197,18 @@ mod tests {
             .await
             .unwrap();
         common::check_test_data_async(&db).await;
-        assert!(!keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
-        assert!(keyvalue::AsyncKeyValueDB::table_names(&db)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

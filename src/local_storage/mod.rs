@@ -1,6 +1,6 @@
 use std::{collections::HashSet, io};
 
-use gloo_storage::{errors::StorageError, LocalStorage, Storage};
+use gloo_storage::{LocalStorage, Storage, errors::StorageError};
 
 use crate::KeyValueDB;
 
@@ -19,7 +19,7 @@ impl LocalStorageDB {
 
 impl KeyValueDB for LocalStorageDB {
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let old_value = self.get(table_name, key)?;
+        let old_value = KeyValueDB::get(self, table_name, key)?;
 
         LocalStorage::set(format!("{}/{}/{}", self.name, table_name, key), value)
             .map_err(storage_error_to_io_error)?;
@@ -36,7 +36,7 @@ impl KeyValueDB for LocalStorageDB {
     }
 
     fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        if let Some(old_value) = self.get(table_name, key)? {
+        if let Some(old_value) = KeyValueDB::get(self, table_name, key)? {
             LocalStorage::delete(format!("{}/{}/{}", self.name, table_name, key));
 
             Ok(Some(old_value))
@@ -56,18 +56,12 @@ impl KeyValueDB for LocalStorageDB {
             let key = local_storage
                 .key(i)
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get key at index {}: {:?}", i, e),
-                    )
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
                 })?
                 .unwrap_or_default();
             if key.starts_with(&prefix) {
                 let value = LocalStorage::get::<Vec<u8>>(&key).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get value for key {}: {:?}", key, e),
-                    )
+                    io::Error::other(format!("Failed to get value for key {}: {:?}", key, e))
                 })?;
                 let key = key.replacen(&format!("{}/{}/", self.name, table_name), "", 1);
 
@@ -89,10 +83,7 @@ impl KeyValueDB for LocalStorageDB {
             let key = local_storage
                 .key(i)
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get key at index {}: {:?}", i, e),
-                    )
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
                 })?
                 .unwrap_or_default();
             if key.starts_with(&prefix) {
@@ -117,10 +108,7 @@ impl KeyValueDB for LocalStorageDB {
             let key = local_storage
                 .key(i)
                 .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to get key at index {}: {:?}", i, e),
-                    )
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
                 })?
                 .unwrap_or_default();
             if key.starts_with(&prefix) {
@@ -155,9 +143,9 @@ fn storage_error_to_io_error(e: StorageError) -> io::Error {
             } else if e.is_eof() {
                 io::Error::new(io::ErrorKind::UnexpectedEof, e.to_string())
             } else {
-                io::Error::new(io::ErrorKind::Other, e.to_string())
+                io::Error::other(e.to_string())
             }
         }
-        StorageError::JsError(e) => io::Error::new(io::ErrorKind::Other, e),
+        StorageError::JsError(e) => io::Error::other(e),
     }
 }

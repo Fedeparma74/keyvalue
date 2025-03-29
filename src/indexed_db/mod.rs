@@ -3,7 +3,7 @@ use std::{io, sync::atomic::AtomicU32};
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use indexed_db::{Database, Factory};
-use js_sys::{wasm_bindgen::JsValue, Uint8Array};
+use js_sys::{Uint8Array, wasm_bindgen::JsValue};
 
 use crate::AsyncKeyValueDB;
 
@@ -354,10 +354,8 @@ fn indexed_db_error_to_io_error(e: indexed_db::Error<()>) -> io::Error {
         indexed_db::Error::DoesNotExist => {
             io::Error::new(io::ErrorKind::NotFound, format!("{:?}", e))
         }
-        indexed_db::Error::FailedClone => io::Error::new(io::ErrorKind::Other, format!("{:?}", e)),
-        indexed_db::Error::IndexedDbDisabled => {
-            io::Error::new(io::ErrorKind::Other, format!("{:?}", e))
-        }
+        indexed_db::Error::FailedClone => io::Error::other(format!("{:?}", e)),
+        indexed_db::Error::IndexedDbDisabled => io::Error::other(format!("{:?}", e)),
         indexed_db::Error::InvalidArgument => {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
         }
@@ -370,26 +368,22 @@ fn indexed_db_error_to_io_error(e: indexed_db::Error<()>) -> io::Error {
         indexed_db::Error::InvalidRange => {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
         }
-        indexed_db::Error::NotInBrowser => io::Error::new(io::ErrorKind::Other, format!("{:?}", e)),
-        indexed_db::Error::ObjectStoreWasRemoved => {
-            io::Error::new(io::ErrorKind::Other, format!("{:?}", e))
-        }
+        indexed_db::Error::NotInBrowser => io::Error::other(format!("{:?}", e)),
+        indexed_db::Error::ObjectStoreWasRemoved => io::Error::other(format!("{:?}", e)),
         indexed_db::Error::OperationNotAllowed => {
             io::Error::new(io::ErrorKind::PermissionDenied, format!("{:?}", e))
         }
-        indexed_db::Error::OperationNotSupported => {
-            io::Error::new(io::ErrorKind::Other, format!("{:?}", e))
-        }
+        indexed_db::Error::OperationNotSupported => io::Error::other(format!("{:?}", e)),
         indexed_db::Error::ReadOnly => {
             io::Error::new(io::ErrorKind::PermissionDenied, format!("{:?}", e))
         }
-        indexed_db::Error::User(e) => io::Error::new(io::ErrorKind::Other, format!("{:?}", e)),
+        indexed_db::Error::User(e) => io::Error::other(format!("{:?}", e)),
         indexed_db::Error::VersionMustNotBeZero => {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
         }
         indexed_db::Error::VersionTooOld => {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
         }
-        e => io::Error::new(io::ErrorKind::Other, format!("{:?}", e)),
+        e => io::Error::other(format!("{:?}", e)),
     }
 }

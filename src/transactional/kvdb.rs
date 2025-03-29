@@ -1,20 +1,17 @@
 use crate::io;
 #[cfg(not(feature = "std"))]
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
-pub trait KeyValueDB: Send + Sync + 'static {
-    fn insert(
-        &self,
-        table_name: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<Option<Vec<u8>>, io::Error>;
+pub trait TransactionalKVDB: Send + Sync + 'static {
+    type ReadTransaction: KVReadTransaction;
+    type WriteTransaction: KVWriteTransaction;
+
+    fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error>;
+    fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
+}
+
+pub trait KVReadTransaction: Send + Sync + 'static {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
-    fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
-    #[allow(clippy::type_complexity)]
     fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;
 
@@ -52,26 +49,29 @@ pub trait KeyValueDB: Send + Sync + 'static {
         }
         Ok(values)
     }
-    fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+}
+
+pub trait KVWriteTransaction: KVReadTransaction {
+    fn insert(
+        &mut self,
+        table_name: &str,
+        key: &str,
+        value: &[u8],
+    ) -> Result<Option<Vec<u8>>, io::Error>;
+    fn remove(&mut self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
+    fn commit(self) -> Result<(), io::Error>;
+    fn abort(self) -> Result<(), io::Error>;
+
+    fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
         for key in self.keys(table_name)? {
             self.remove(table_name, &key)?;
         }
         Ok(())
     }
-    fn clear(&self) -> Result<(), io::Error> {
+    fn clear(&mut self) -> Result<(), io::Error> {
         for table_name in self.table_names()? {
             self.delete_table(&table_name)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn is_dyn() {
-        let _: Option<Box<dyn KeyValueDB>> = None;
     }
 }
