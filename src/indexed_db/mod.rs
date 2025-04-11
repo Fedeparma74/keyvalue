@@ -1,8 +1,9 @@
+use core::convert::Infallible;
 use std::{io, sync::atomic::AtomicU32};
 
 use async_trait::async_trait;
 use futures::lock::Mutex;
-use indexed_db::{Database, Factory};
+use indexed_db::{Database, Factory, Transaction, VersionChangeEvent};
 use js_sys::{Uint8Array, wasm_bindgen::JsValue};
 
 use crate::AsyncKeyValueDB;
@@ -11,7 +12,7 @@ use crate::AsyncKeyValueDB;
 pub struct IndexedDB {
     name: String,
     version: AtomicU32,
-    inner: Mutex<Database<()>>,
+    inner: Mutex<Database>,
 }
 
 // Safety: It is safe to implement Send and Sync for IndexedDB because
@@ -58,13 +59,17 @@ impl AsyncKeyValueDB for IndexedDB {
 
             *db = Factory::get()
                 .map_err(indexed_db_error_to_io_error)?
-                .open(&self.name, new_version, move |evt| async move {
-                    let db = evt.database();
-                    db.build_object_store(&table_name_str).create()?;
-                    Ok(())
-                })
+                .open::<Infallible>(
+                    &self.name,
+                    new_version,
+                    move |evt: VersionChangeEvent<Infallible>| async move {
+                        evt.build_object_store(&table_name_str).create()?;
+                        Ok(())
+                    },
+                )
                 .await
-                .map_err(indexed_db_error_to_io_error)?;
+                .map_err(indexed_db_error_to_io_error)?
+                .into_manual_close();
         }
 
         let table_name = table_name.to_string();
@@ -72,7 +77,7 @@ impl AsyncKeyValueDB for IndexedDB {
         let value = value.to_vec();
         db.transaction(&[&table_name])
             .rw()
-            .run(move |tx| async move {
+            .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
                 let table = tx.object_store(&table_name)?;
                 table
                     .put_kv(
@@ -80,7 +85,7 @@ impl AsyncKeyValueDB for IndexedDB {
                         &Uint8Array::from(value.as_ref()).into(),
                     )
                     .await?;
-                Ok::<_, indexed_db::Error<()>>(())
+                Ok(())
             })
             .await
             .map_err(indexed_db_error_to_io_error)?;
@@ -95,10 +100,10 @@ impl AsyncKeyValueDB for IndexedDB {
         let key = key.to_string();
         let value = match db
             .transaction(&[&table_name])
-            .run(move |tx| async move {
+            .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
                 let table = tx.object_store(&table_name)?;
                 let value = table.get(&JsValue::from(key)).await?;
-                Ok::<_, indexed_db::Error<()>>(value)
+                Ok(value)
             })
             .await
             .map_err(indexed_db_error_to_io_error)
@@ -130,13 +135,17 @@ impl AsyncKeyValueDB for IndexedDB {
                     + 1;
                 *db = Factory::get()
                     .map_err(indexed_db_error_to_io_error)?
-                    .open(&self.name, new_version, move |evt| async move {
-                        let db = evt.database();
-                        db.build_object_store(&table_name_str).create()?;
-                        Ok(())
-                    })
+                    .open::<Infallible>(
+                        &self.name,
+                        new_version,
+                        move |evt: VersionChangeEvent<Infallible>| async move {
+                            evt.build_object_store(&table_name_str).create()?;
+                            Ok(())
+                        },
+                    )
                     .await
-                    .map_err(indexed_db_error_to_io_error)?;
+                    .map_err(indexed_db_error_to_io_error)?
+                    .into_manual_close();
             }
 
             let table_name = table_name.to_string();
@@ -144,10 +153,10 @@ impl AsyncKeyValueDB for IndexedDB {
             if let Err(e) = db
                 .transaction(&[&table_name])
                 .rw()
-                .run(move |tx| async move {
+                .run::<(), Infallible>(move |tx: Transaction<Infallible>| async move {
                     let table = tx.object_store(&table_name)?;
                     table.delete(&JsValue::from(key)).await?;
-                    Ok::<_, indexed_db::Error<()>>(())
+                    Ok(())
                 })
                 .await
                 .map_err(indexed_db_error_to_io_error)
@@ -171,7 +180,7 @@ impl AsyncKeyValueDB for IndexedDB {
         let table_name = table_name.to_string();
         let values = match db
             .transaction(&[&table_name])
-            .run(move |tx| async move {
+            .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
                 let table = tx.object_store(&table_name)?;
                 let mut key_values = Vec::new();
                 for key in table.get_all_keys(None).await? {
@@ -182,7 +191,7 @@ impl AsyncKeyValueDB for IndexedDB {
                     }
                 }
 
-                Ok::<_, indexed_db::Error<()>>(key_values)
+                Ok(key_values)
             })
             .await
             .map_err(indexed_db_error_to_io_error)
@@ -218,13 +227,17 @@ impl AsyncKeyValueDB for IndexedDB {
                 + 1;
             *db = Factory::get()
                 .map_err(indexed_db_error_to_io_error)?
-                .open(&self.name, new_version, move |evt| async move {
-                    let db = evt.database();
-                    db.delete_object_store(&table_name_str)?;
-                    Ok(())
-                })
+                .open::<Infallible>(
+                    &self.name,
+                    new_version,
+                    move |evt: VersionChangeEvent<Infallible>| async move {
+                        evt.delete_object_store(&table_name_str)?;
+                        Ok(())
+                    },
+                )
                 .await
-                .map_err(indexed_db_error_to_io_error)?;
+                .map_err(indexed_db_error_to_io_error)?
+                .into_manual_close();
         }
 
         Ok(())
@@ -237,10 +250,10 @@ impl AsyncKeyValueDB for IndexedDB {
         let key = key.to_string();
         let contains_key = match db
             .transaction(&[&table_name])
-            .run(move |tx| async move {
+            .run(move |tx: Transaction<Infallible>| async move {
                 let table = tx.object_store(&table_name)?;
                 let contains_key = table.contains(&JsValue::from(key)).await?;
-                Ok::<_, indexed_db::Error<()>>(contains_key)
+                Ok(contains_key)
             })
             .await
             .map_err(indexed_db_error_to_io_error)
@@ -264,14 +277,14 @@ impl AsyncKeyValueDB for IndexedDB {
         let table_name = table_name.to_string();
         let keys = match db
             .transaction(&[&table_name])
-            .run(move |tx| async move {
+            .run(move |tx: Transaction<Infallible>| async move {
                 let table = tx.object_store(&table_name)?;
                 let mut keys = Vec::new();
                 for key in table.get_all_keys(None).await? {
                     keys.push(key.as_string().unwrap_or_default());
                 }
 
-                Ok::<_, indexed_db::Error<()>>(keys)
+                Ok(keys)
             })
             .await
             .map_err(indexed_db_error_to_io_error)
@@ -295,14 +308,14 @@ impl AsyncKeyValueDB for IndexedDB {
         let table_name = table_name.to_string();
         let values = match db
             .transaction(&[&table_name])
-            .run(move |tx| async move {
+            .run(move |tx: Transaction<Infallible>| async move {
                 let table = tx.object_store(&table_name)?;
                 let mut values = Vec::new();
                 for value in table.get_all(None).await? {
                     values.push(Uint8Array::from(value).to_vec());
                 }
 
-                Ok::<_, indexed_db::Error<()>>(values)
+                Ok(values)
             })
             .await
             .map_err(indexed_db_error_to_io_error)
@@ -343,7 +356,7 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 }
 
-fn indexed_db_error_to_io_error(e: indexed_db::Error<()>) -> io::Error {
+fn indexed_db_error_to_io_error(e: indexed_db::Error<std::convert::Infallible>) -> io::Error {
     match e {
         indexed_db::Error::AlreadyExists => {
             io::Error::new(io::ErrorKind::AlreadyExists, format!("{:?}", e))
