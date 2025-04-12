@@ -1,37 +1,138 @@
-use core::convert::Infallible;
-use std::{io, sync::atomic::AtomicU32};
+use core::{convert::Infallible, pin::Pin};
+use std::{
+    io,
+    rc::Rc,
+    sync::{Arc, atomic::AtomicU32},
+};
 
 use async_trait::async_trait;
-use futures::lock::Mutex;
+use futures::{
+    FutureExt, StreamExt,
+    channel::{mpsc::UnboundedSender, oneshot},
+    lock::Mutex,
+};
 use indexed_db::{Database, Factory, Transaction, VersionChangeEvent};
 use js_sys::{Uint8Array, wasm_bindgen::JsValue};
 
 use crate::AsyncKeyValueDB;
 
-#[derive(Debug)]
-pub struct IndexedDB {
-    name: String,
-    version: AtomicU32,
-    inner: Mutex<Database>,
+type CommandRequestClosure = Box<
+    dyn FnOnce(
+            Rc<Mutex<Database>>,
+        ) -> Pin<Box<dyn Future<Output = Result<CommandResponse, std::io::Error>>>>
+        + Send,
+>;
+
+enum CommandResponse {
+    Insert(()),
+    Get(Option<Vec<u8>>),
+    Remove(Option<Vec<u8>>),
+    Iter(Vec<(String, Vec<u8>)>),
+    TableNames(Vec<String>),
+    DeleteTable(()),
+    ContainsKey(bool),
+    Keys(Vec<String>),
+    Values(Vec<Vec<u8>>),
+    Clear(()),
+    Error(std::io::Error),
 }
 
-// Safety: It is safe to implement Send and Sync for IndexedDB because
-// it can only be used in a browser environment, that is single-threaded.
-unsafe impl Send for IndexedDB {}
-unsafe impl Sync for IndexedDB {}
+pub struct IndexedDB {
+    name: String,
+    version: Arc<AtomicU32>,
+    idb_dropper: Option<oneshot::Sender<()>>,
+    task_handle: wasmt::task::r#async::JoinHandle<()>,
+    command_request_sender:
+        UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
+}
+
+impl Drop for IndexedDB {
+    fn drop(&mut self) {
+        // Close the database connection
+        self.idb_dropper.take().map(|sender| sender.send(()).ok());
+        self.task_handle.abort();
+    }
+}
 
 impl IndexedDB {
     pub async fn open(db_name: &str) -> io::Result<Self> {
-        let db = Factory::get()
-            .map_err(indexed_db_error_to_io_error)?
-            .open_latest_version(db_name)
+        let (init_res_sender, init_res_receiver) =
+            futures::channel::oneshot::channel::<io::Result<u32>>();
+
+        let (command_sender, mut command_receiver) = futures::channel::mpsc::unbounded::<(
+            CommandRequestClosure,
+            oneshot::Sender<CommandResponse>,
+        )>();
+        let (idb_dropper, mut idb_dropper_receiver) = futures::channel::oneshot::channel::<()>();
+
+        let db_name_clone = db_name.to_string();
+        let idb_task = async move {
+            let db_factory = match Factory::get() {
+                Ok(db_factory) => db_factory,
+                Err(e) => {
+                    init_res_sender
+                        .send(Err(indexed_db_error_to_io_error(e)))
+                        .ok();
+                    return;
+                }
+            };
+
+            let (db_version, db) = match db_factory.open_latest_version(&db_name_clone).await {
+                Ok(db) => (db.version(), Rc::new(Mutex::new(db))),
+                Err(e) => {
+                    init_res_sender
+                        .send(Err(indexed_db_error_to_io_error(e)))
+                        .ok();
+                    return;
+                }
+            };
+
+            init_res_sender.send(Ok(db_version)).ok();
+
+            loop {
+                futures::select! {
+                    (command, command_response_sender) = command_receiver.select_next_some() => {
+                        match command(db.clone()).await {
+                            Ok(response) => {
+                                command_response_sender.send(response).ok();
+                            }
+                            Err(e) => {
+                                command_response_sender.send(CommandResponse::Error(e)).ok();
+                            }
+                        }
+                    }
+                    _ = idb_dropper_receiver => {
+                        db.lock().await.close();
+                        return;
+                    }
+                }
+            }
+        };
+
+        #[cfg(all(
+            target_feature = "atomics",
+            target_feature = "bulk-memory",
+            target_feature = "mutable-globals"
+        ))]
+        let task_handle = wasmt::task::spawn(idb_task);
+
+        #[cfg(not(all(
+            target_feature = "atomics",
+            target_feature = "bulk-memory",
+            target_feature = "mutable-globals"
+        )))]
+        let task_handle = wasmt::task::spawn_local(idb_task);
+
+        let db_version = init_res_receiver
             .await
-            .map_err(indexed_db_error_to_io_error)?;
+            .map_err(|_| io::Error::other("Failed to receive initialization response"))??;
 
         Ok(Self {
             name: db_name.to_string(),
-            version: AtomicU32::new(db.version()),
-            inner: Mutex::new(db),
+            version: Arc::new(AtomicU32::new(db_version)),
+            idb_dropper: Some(idb_dropper),
+            task_handle,
+            command_request_sender: command_sender,
         })
     }
 }
@@ -46,313 +147,551 @@ impl AsyncKeyValueDB for IndexedDB {
     ) -> Result<Option<Vec<u8>>, io::Error> {
         let old_value = self.get(table_name, key).await?;
 
-        let mut db = self.inner.lock().await;
-
-        if !db.object_store_names().into_iter().any(|n| n == table_name) {
-            db.close();
-
-            let table_name_str = table_name.to_string();
-            let new_version = self
-                .version
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-
-            *db = Factory::get()
-                .map_err(indexed_db_error_to_io_error)?
-                .open::<Infallible>(
-                    &self.name,
-                    new_version,
-                    move |evt: VersionChangeEvent<Infallible>| async move {
-                        evt.build_object_store(&table_name_str).create()?;
-                        Ok(())
-                    },
-                )
-                .await
-                .map_err(indexed_db_error_to_io_error)?
-                .into_manual_close();
-        }
-
+        let name = self.name.clone();
+        let version = self.version.clone();
         let table_name = table_name.to_string();
         let key = key.to_string();
         let value = value.to_vec();
-        db.transaction(&[&table_name])
-            .rw()
-            .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                let table = tx.object_store(&table_name)?;
-                table
-                    .put_kv(
-                        &JsValue::from(key),
-                        &Uint8Array::from(value.as_ref()).into(),
-                    )
-                    .await?;
-                Ok(())
-            })
-            .await
-            .map_err(indexed_db_error_to_io_error)?;
+        let insert_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let mut db = db.lock().await;
+                if !db.object_store_names().into_iter().any(|n| n == table_name) {
+                    db.close();
 
-        Ok(old_value)
+                    let table_name_str = table_name.to_string();
+                    let new_version = version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+                    *db = Factory::get()
+                        .map_err(indexed_db_error_to_io_error)?
+                        .open::<Infallible>(
+                            &name,
+                            new_version,
+                            move |evt: VersionChangeEvent<Infallible>| async move {
+                                evt.build_object_store(&table_name_str).create()?;
+                                Ok(())
+                            },
+                        )
+                        .await
+                        .map_err(indexed_db_error_to_io_error)?
+                        .into_manual_close();
+                }
+
+                let table_name = table_name.to_string();
+                let key = key.to_string();
+                let value = value.to_vec();
+                db.transaction(&[&table_name])
+                    .rw()
+                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        table
+                            .put_kv(
+                                &JsValue::from(key),
+                                &Uint8Array::from(value.as_ref()).into(),
+                            )
+                            .await?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)?;
+
+                Ok::<_, std::io::Error>(CommandResponse::Insert(()))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(insert_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Insert(()) = response {
+            return Ok(old_value);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        let db = self.inner.lock().await;
-
         let table_name = table_name.to_string();
         let key = key.to_string();
-        let value = match db
-            .transaction(&[&table_name])
-            .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                let table = tx.object_store(&table_name)?;
-                let value = table.get(&JsValue::from(key)).await?;
-                Ok(value)
-            })
-            .await
-            .map_err(indexed_db_error_to_io_error)
-        {
-            Ok(value) => value,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return Ok(None);
-                } else {
-                    return Err(e);
-                }
+        let get_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let db = db.lock().await;
+                let table_name = table_name.to_string();
+                let key = key.to_string();
+                let value = match db
+                    .transaction(&[&table_name])
+                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let value = table.get(&JsValue::from(key)).await?;
+                        Ok(value)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Get(None));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::Get(
+                    value.map(|v| Uint8Array::from(v).to_vec()),
+                ))
             }
+            .boxed_local()
         };
 
-        Ok(value.map(|v| Uint8Array::from(v).to_vec()))
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(get_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Get(value) = response {
+            return Ok(value);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if let Some(old_value) = self.get(table_name, key).await? {
-            let mut db = self.inner.lock().await;
-
-            if !db.object_store_names().into_iter().any(|n| n == table_name) {
-                db.close();
-
-                let table_name_str = table_name.to_string();
-                let new_version = self
-                    .version
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-                *db = Factory::get()
-                    .map_err(indexed_db_error_to_io_error)?
-                    .open::<Infallible>(
-                        &self.name,
-                        new_version,
-                        move |evt: VersionChangeEvent<Infallible>| async move {
-                            evt.build_object_store(&table_name_str).create()?;
-                            Ok(())
-                        },
-                    )
-                    .await
-                    .map_err(indexed_db_error_to_io_error)?
-                    .into_manual_close();
-            }
-
+            let name = self.name.clone();
+            let version = self.version.clone();
             let table_name = table_name.to_string();
             let key = key.to_string();
-            if let Err(e) = db
-                .transaction(&[&table_name])
-                .rw()
-                .run::<(), Infallible>(move |tx: Transaction<Infallible>| async move {
-                    let table = tx.object_store(&table_name)?;
-                    table.delete(&JsValue::from(key)).await?;
-                    Ok(())
-                })
-                .await
-                .map_err(indexed_db_error_to_io_error)
-            {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return Ok(None);
-                } else {
-                    return Err(e);
+
+            let remove_closure = move |db: Rc<Mutex<Database>>| {
+                async move {
+                    let mut db = db.lock().await;
+                    if !db.object_store_names().into_iter().any(|n| n == table_name) {
+                        db.close();
+
+                        let table_name_str = table_name.to_string();
+                        let new_version =
+                            version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+                        *db = Factory::get()
+                            .map_err(indexed_db_error_to_io_error)?
+                            .open::<Infallible>(
+                                &name,
+                                new_version,
+                                move |evt: VersionChangeEvent<Infallible>| async move {
+                                    evt.build_object_store(&table_name_str).create()?;
+                                    Ok(())
+                                },
+                            )
+                            .await
+                            .map_err(indexed_db_error_to_io_error)?
+                            .into_manual_close();
+                    }
+
+                    let table_name = table_name.to_string();
+                    let key = key.to_string();
+                    if let Err(e) = db
+                        .transaction(&[&table_name])
+                        .rw()
+                        .run::<(), Infallible>(move |tx: Transaction<Infallible>| async move {
+                            let table = tx.object_store(&table_name)?;
+                            table.delete(&JsValue::from(key)).await?;
+                            Ok(())
+                        })
+                        .await
+                        .map_err(indexed_db_error_to_io_error)
+                    {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Remove(None));
+                        } else {
+                            return Err(e);
+                        }
+                    };
+
+                    Ok::<_, std::io::Error>(CommandResponse::Remove(Some(old_value)))
                 }
+                .boxed_local()
             };
 
-            Ok(Some(old_value))
+            let (response_sender, response_receiver) = oneshot::channel();
+            self.command_request_sender
+                .unbounded_send((Box::new(remove_closure), response_sender))
+                .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+            let response = response_receiver
+                .await
+                .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+            if let CommandResponse::Remove(value) = response {
+                return Ok(value);
+            }
+            if let CommandResponse::Error(e) = response {
+                return Err(e);
+            }
+
+            Err(io::Error::other("Unexpected response type"))
         } else {
             Ok(None)
         }
     }
 
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let db = self.inner.lock().await;
-
         let table_name = table_name.to_string();
-        let values = match db
-            .transaction(&[&table_name])
-            .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                let table = tx.object_store(&table_name)?;
-                let mut key_values = Vec::new();
-                for key in table.get_all_keys(None).await? {
-                    if let Some(value) = table.get(&key).await? {
-                        let key = key.as_string().unwrap_or_default();
-                        let value = Uint8Array::from(value).to_vec();
-                        key_values.push((key, value));
-                    }
-                }
+        let iter_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let db = db.lock().await;
+                let table_name = table_name.to_string();
+                let values = match db
+                    .transaction(&[&table_name])
+                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let mut key_values = Vec::new();
+                        for key in table.get_all_keys(None).await? {
+                            if let Some(value) = table.get(&key).await? {
+                                let key = key.as_string().unwrap_or_default();
+                                let value = Uint8Array::from(value).to_vec();
+                                key_values.push((key, value));
+                            }
+                        }
 
-                Ok(key_values)
-            })
-            .await
-            .map_err(indexed_db_error_to_io_error)
-        {
-            Ok(values) => values,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return Ok(Vec::new());
-                } else {
-                    return Err(e);
-                }
+                        Ok(key_values)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(values) => values,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Iter(Vec::new()));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::Iter(values))
             }
+            .boxed_local()
         };
 
-        Ok(values)
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(iter_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Iter(values) = response {
+            return Ok(values);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        let db = self.inner.lock().await;
-        Ok(db.object_store_names())
+        let table_names_closure = |db: Rc<Mutex<Database>>| {
+            async move {
+                let db = db.lock().await;
+                let table_names = db.object_store_names();
+                Ok::<_, std::io::Error>(CommandResponse::TableNames(table_names))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(table_names_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::TableNames(table_names) = response {
+            return Ok(table_names);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        let mut db = self.inner.lock().await;
+        let name = self.name.clone();
+        let version = self.version.clone();
+        let table_name = table_name.to_string();
+        let delete_table_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let mut db = db.lock().await;
+                if db.object_store_names().into_iter().any(|n| n == table_name) {
+                    db.close();
 
-        if db.object_store_names().into_iter().any(|n| n == table_name) {
-            db.close();
+                    let table_name_str = table_name.to_string();
+                    let new_version = version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-            let table_name_str = table_name.to_string();
-            let new_version = self
-                .version
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-            *db = Factory::get()
-                .map_err(indexed_db_error_to_io_error)?
-                .open::<Infallible>(
-                    &self.name,
-                    new_version,
-                    move |evt: VersionChangeEvent<Infallible>| async move {
-                        evt.delete_object_store(&table_name_str)?;
-                        Ok(())
-                    },
-                )
-                .await
-                .map_err(indexed_db_error_to_io_error)?
-                .into_manual_close();
+                    *db = Factory::get()
+                        .map_err(indexed_db_error_to_io_error)?
+                        .open::<Infallible>(
+                            &name,
+                            new_version,
+                            move |evt: VersionChangeEvent<Infallible>| async move {
+                                evt.delete_object_store(&table_name_str)?;
+                                Ok(())
+                            },
+                        )
+                        .await
+                        .map_err(indexed_db_error_to_io_error)?
+                        .into_manual_close();
+                }
+
+                Ok::<_, std::io::Error>(CommandResponse::DeleteTable(()))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(delete_table_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::DeleteTable(()) = response {
+            return Ok(());
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
         }
 
-        Ok(())
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        let db = self.inner.lock().await;
-
         let table_name = table_name.to_string();
         let key = key.to_string();
-        let contains_key = match db
-            .transaction(&[&table_name])
-            .run(move |tx: Transaction<Infallible>| async move {
-                let table = tx.object_store(&table_name)?;
-                let contains_key = table.contains(&JsValue::from(key)).await?;
-                Ok(contains_key)
-            })
-            .await
-            .map_err(indexed_db_error_to_io_error)
-        {
-            Ok(contains_key) => contains_key,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return Ok(false);
-                } else {
-                    return Err(e);
-                }
+        let contains_key_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let db = db.lock().await;
+                let table_name = table_name.to_string();
+                let key = key.to_string();
+                let contains_key = match db
+                    .transaction(&[&table_name])
+                    .run(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let contains_key = table.contains(&JsValue::from(key)).await?;
+                        Ok(contains_key)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(contains_key) => contains_key,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::ContainsKey(false));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::ContainsKey(contains_key))
             }
+            .boxed_local()
         };
 
-        Ok(contains_key)
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(contains_key_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::ContainsKey(contains_key) = response {
+            return Ok(contains_key);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        let db = self.inner.lock().await;
-
         let table_name = table_name.to_string();
-        let keys = match db
-            .transaction(&[&table_name])
-            .run(move |tx: Transaction<Infallible>| async move {
-                let table = tx.object_store(&table_name)?;
-                let mut keys = Vec::new();
-                for key in table.get_all_keys(None).await? {
-                    keys.push(key.as_string().unwrap_or_default());
-                }
+        let keys_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let db = db.lock().await;
+                let table_name = table_name.to_string();
+                let keys = match db
+                    .transaction(&[&table_name])
+                    .run(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let mut keys = Vec::new();
+                        for key in table.get_all_keys(None).await? {
+                            keys.push(key.as_string().unwrap_or_default());
+                        }
 
-                Ok(keys)
-            })
-            .await
-            .map_err(indexed_db_error_to_io_error)
-        {
-            Ok(keys) => keys,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return Ok(Vec::new());
-                } else {
-                    return Err(e);
-                }
+                        Ok(keys)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Keys(Vec::new()));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::Keys(keys))
             }
+            .boxed_local()
         };
 
-        Ok(keys)
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(keys_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Keys(keys) = response {
+            return Ok(keys);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        let db = self.inner.lock().await;
-
         let table_name = table_name.to_string();
-        let values = match db
-            .transaction(&[&table_name])
-            .run(move |tx: Transaction<Infallible>| async move {
-                let table = tx.object_store(&table_name)?;
-                let mut values = Vec::new();
-                for value in table.get_all(None).await? {
-                    values.push(Uint8Array::from(value).to_vec());
-                }
+        let values_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let db = db.lock().await;
+                let table_name = table_name.to_string();
+                let values = match db
+                    .transaction(&[&table_name])
+                    .run(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let mut values = Vec::new();
+                        for value in table.get_all(None).await? {
+                            values.push(Uint8Array::from(value).to_vec());
+                        }
 
-                Ok(values)
-            })
-            .await
-            .map_err(indexed_db_error_to_io_error)
-        {
-            Ok(values) => values,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    return Ok(Vec::new());
-                } else {
-                    return Err(e);
-                }
+                        Ok(values)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(values) => values,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Values(Vec::new()));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::Values(values))
             }
+            .boxed_local()
         };
 
-        Ok(values)
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(values_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Values(values) = response {
+            return Ok(values);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 
     async fn clear(&self) -> io::Result<()> {
-        let mut db = self.inner.lock().await;
-        db.close();
+        let name = self.name.clone();
+        let version = self.version.clone();
+        let clear_closure = move |db: Rc<Mutex<Database>>| {
+            async move {
+                let mut db = db.lock().await;
+                db.close();
 
-        Factory::get()
-            .map_err(indexed_db_error_to_io_error)?
-            .delete_database(&self.name)
+                Factory::get()
+                    .map_err(indexed_db_error_to_io_error)?
+                    .delete_database(&name)
+                    .await
+                    .map_err(indexed_db_error_to_io_error)?;
+
+                *db = Factory::get()
+                    .map_err(indexed_db_error_to_io_error)?
+                    .open_latest_version(&name)
+                    .await
+                    .map_err(indexed_db_error_to_io_error)?;
+
+                version.store(db.version(), std::sync::atomic::Ordering::SeqCst);
+
+                Ok::<_, std::io::Error>(CommandResponse::Clear(()))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(clear_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
             .await
-            .map_err(indexed_db_error_to_io_error)?;
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
 
-        *db = Factory::get()
-            .map_err(indexed_db_error_to_io_error)?
-            .open_latest_version(&self.name)
-            .await
-            .map_err(indexed_db_error_to_io_error)?;
+        if let CommandResponse::Clear(()) = response {
+            return Ok(());
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
 
-        self.version
-            .store(db.version(), std::sync::atomic::Ordering::SeqCst);
-
-        Ok(())
+        Err(io::Error::other("Unexpected response type"))
     }
 }
 

@@ -43,6 +43,7 @@ getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 web-time = { version = "1", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
+wasmt = { git = "https://github.com/Fedeparma74/wasmt", optional = true }
 
 [features]
 default = ["std", "async"]
@@ -71,7 +72,7 @@ aws-s3 = [
     "dep:wasm-bindgen-futures",
 ]
 local-storage = ["std", "dep:gloo-storage"]
-indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys"]
+indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys", "dep:wasmt"]
 
 test = [
     "std",

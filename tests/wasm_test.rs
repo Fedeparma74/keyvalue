@@ -132,7 +132,7 @@ mod tests {
         wasmt::task::spawn(async move {
             let name = "test_async_indexed_db_in_worker_db";
             let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
-            common::test_async_db(&db).await;
+            futures::executor::block_on(common::test_async_db(&db));
             common::persist_test_data_async(Box::new(db)).await;
             let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
             common::check_test_data_async(&db).await;
