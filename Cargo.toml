@@ -43,7 +43,7 @@ getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 web-time = { version = "1", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-wasmt = { git = "https://github.com/Fedeparma74/wasmt", optional = true }
+wasmt = { git = "https://github.com/Fedeparma74/wasmt", branch = "js-workers", optional = true }
 
 [features]
 default = ["std", "async"]
@@ -106,7 +106,7 @@ tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
-wasmt = { git = "https://github.com/Fedeparma74/wasmt" }
+wasmt = { git = "https://github.com/Fedeparma74/wasmt", branch = "js-workers" }
 
 [profile.dev]
 opt-level = 1
