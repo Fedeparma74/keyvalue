@@ -1,10 +1,14 @@
+[net]
+git-fetch-with-cli = true
+
 [target.wasm32-unknown-unknown]
 rustflags = [
-    '--cfg',
-    'getrandom_backend="wasm_js"',
     '-C',
     'target-feature=+atomics,+bulk-memory,+mutable-globals',
+    '--cfg',
+    'getrandom_backend="wasm_js"',
 ]
+
 
 [unstable]
 build-std = ['std', 'panic_abort']

@@ -16,6 +16,9 @@ use tokio::sync::RwLock;
 
 use crate::AsyncKeyValueDB;
 
+#[cfg(feature = "transactional")]
+mod transactional;
+
 type CommandRequestClosure = Box<
     dyn FnOnce(
             Rc<RwLock<Database>>,
@@ -34,6 +37,7 @@ enum CommandResponse {
     Keys(Vec<String>),
     Values(Vec<Vec<u8>>),
     Clear,
+    Commit,
     Error(std::io::Error),
 }
 
@@ -68,7 +72,7 @@ impl IndexedDB {
         let db_name_clone = db_name.to_string();
         let idb_task = async move {
             let db_factory = match Factory::get() {
-                Ok(db_factory) => db_factory,
+                Ok(factory) => factory,
                 Err(e) => {
                     init_res_sender
                         .send(Err(indexed_db_error_to_io_error(e)))
@@ -695,47 +699,38 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 }
 
-fn indexed_db_error_to_io_error(e: indexed_db::Error<std::convert::Infallible>) -> io::Error {
+fn indexed_db_error_to_io_error<T>(e: indexed_db::Error<T>) -> io::Error
+where
+    T: std::fmt::Debug,
+{
     match e {
+        indexed_db::Error::DoesNotExist => {
+            io::Error::new(io::ErrorKind::NotFound, format!("{:?}", e))
+        }
         indexed_db::Error::AlreadyExists => {
             io::Error::new(io::ErrorKind::AlreadyExists, format!("{:?}", e))
         }
         indexed_db::Error::DatabaseIsClosed => {
             io::Error::new(io::ErrorKind::NotConnected, format!("{:?}", e))
         }
-        indexed_db::Error::DoesNotExist => {
-            io::Error::new(io::ErrorKind::NotFound, format!("{:?}", e))
-        }
-        indexed_db::Error::FailedClone => io::Error::other(format!("{:?}", e)),
-        indexed_db::Error::IndexedDbDisabled => io::Error::other(format!("{:?}", e)),
-        indexed_db::Error::InvalidArgument => {
+        indexed_db::Error::InvalidArgument
+        | indexed_db::Error::InvalidKey
+        | indexed_db::Error::InvalidRange
+        | indexed_db::Error::VersionMustNotBeZero
+        | indexed_db::Error::VersionTooOld => {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
         }
-        indexed_db::Error::InvalidCall => {
+        indexed_db::Error::InvalidCall
+        | indexed_db::Error::OperationNotAllowed
+        | indexed_db::Error::ReadOnly => {
             io::Error::new(io::ErrorKind::PermissionDenied, format!("{:?}", e))
         }
-        indexed_db::Error::InvalidKey => {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
-        }
-        indexed_db::Error::InvalidRange => {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
-        }
-        indexed_db::Error::NotInBrowser => io::Error::other(format!("{:?}", e)),
-        indexed_db::Error::ObjectStoreWasRemoved => io::Error::other(format!("{:?}", e)),
-        indexed_db::Error::OperationNotAllowed => {
-            io::Error::new(io::ErrorKind::PermissionDenied, format!("{:?}", e))
-        }
-        indexed_db::Error::OperationNotSupported => io::Error::other(format!("{:?}", e)),
-        indexed_db::Error::ReadOnly => {
-            io::Error::new(io::ErrorKind::PermissionDenied, format!("{:?}", e))
-        }
-        indexed_db::Error::User(e) => io::Error::other(format!("{:?}", e)),
-        indexed_db::Error::VersionMustNotBeZero => {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
-        }
-        indexed_db::Error::VersionTooOld => {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("{:?}", e))
-        }
+        indexed_db::Error::FailedClone
+        | indexed_db::Error::IndexedDbDisabled
+        | indexed_db::Error::NotInBrowser
+        | indexed_db::Error::ObjectStoreWasRemoved
+        | indexed_db::Error::OperationNotSupported
+        | indexed_db::Error::User(_) => io::Error::other(format!("{:?}", e)),
         e => io::Error::other(format!("{:?}", e)),
     }
 }

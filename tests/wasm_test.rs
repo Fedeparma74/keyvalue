@@ -120,6 +120,50 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "async", feature = "transactional", feature = "indexed-db"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_transactional_indexed_db() {
+        let name = "test_async_transactional_indexed_db_db";
+        let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
+        common::test_async_transactional_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
+        common::check_test_data_async(&db).await;
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
+            .await
+            .unwrap();
+        keyvalue::AsyncKVWriteTransaction::clear(&mut write)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&write)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKVWriteTransaction::commit(write)
+            .await
+            .unwrap();
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[cfg(all(
         feature = "async",
         feature = "indexed-db",
