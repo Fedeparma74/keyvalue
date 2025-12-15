@@ -1,4 +1,4 @@
-use crate::{AsyncKeyValueDB, io};
+use crate::{AsyncKeyValueDB, MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -8,7 +8,7 @@ use super::VersionedObject;
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-pub trait AsyncVersionedKeyValueDB: Send + Sync + 'static {
+pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
     async fn insert(
         &self,
         table_name: &str,

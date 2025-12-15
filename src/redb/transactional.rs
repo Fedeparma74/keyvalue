@@ -1,8 +1,8 @@
 use std::io;
 
 use redb::{
-    ReadTransaction, ReadableTable, StorageError, TableDefinition, TableError, TableHandle,
-    WriteTransaction,
+    ReadTransaction, ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError,
+    TableHandle, WriteTransaction,
 };
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};

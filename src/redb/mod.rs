@@ -1,7 +1,7 @@
 use std::{io, path::Path};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
-use redb::{ReadableTable, TableDefinition, TableHandle};
+use redb::{ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 
 use crate::KeyValueDB;
 

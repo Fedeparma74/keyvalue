@@ -1,11 +1,11 @@
-use crate::io;
+use crate::{MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
-pub trait KeyValueDB: Send + Sync + 'static {
+pub trait KeyValueDB: MaybeSendSync + 'static {
     fn insert(
         &self,
         table_name: &str,

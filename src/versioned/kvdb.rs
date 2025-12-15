@@ -1,4 +1,4 @@
-use crate::{KeyValueDB, io};
+use crate::{KeyValueDB, MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
@@ -7,7 +7,7 @@ use alloc::{
 
 use super::VersionedObject;
 
-pub trait VersionedKeyValueDB: Send + Sync + 'static {
+pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
     fn insert(
         &self,
         table_name: &str,

@@ -9,31 +9,31 @@ use async_trait::async_trait;
 use futures::{
     FutureExt, StreamExt,
     channel::{mpsc::UnboundedSender, oneshot},
-    lock::Mutex,
 };
 use indexed_db::{Database, Factory, Transaction, VersionChangeEvent};
 use js_sys::{Uint8Array, wasm_bindgen::JsValue};
+use tokio::sync::RwLock;
 
 use crate::AsyncKeyValueDB;
 
 type CommandRequestClosure = Box<
     dyn FnOnce(
-            Rc<Mutex<Database>>,
+            Rc<RwLock<Database>>,
         ) -> Pin<Box<dyn Future<Output = Result<CommandResponse, std::io::Error>>>>
         + Send,
 >;
 
 enum CommandResponse {
-    Insert(()),
+    Insert,
     Get(Option<Vec<u8>>),
     Remove(Option<Vec<u8>>),
     Iter(Vec<(String, Vec<u8>)>),
     TableNames(Vec<String>),
-    DeleteTable(()),
+    DeleteTable,
     ContainsKey(bool),
     Keys(Vec<String>),
     Values(Vec<Vec<u8>>),
-    Clear(()),
+    Clear,
     Error(std::io::Error),
 }
 
@@ -78,7 +78,7 @@ impl IndexedDB {
             };
 
             let (db_version, db) = match db_factory.open_latest_version(&db_name_clone).await {
-                Ok(db) => (db.version(), Rc::new(Mutex::new(db))),
+                Ok(db) => (db.version(), Rc::new(RwLock::new(db))),
                 Err(e) => {
                     init_res_sender
                         .send(Err(indexed_db_error_to_io_error(e)))
@@ -102,7 +102,7 @@ impl IndexedDB {
                         }
                     }
                     _ = idb_dropper_receiver => {
-                        db.lock().await.close();
+                        db.read().await.close();
                         return;
                     }
                 }
@@ -152,9 +152,9 @@ impl AsyncKeyValueDB for IndexedDB {
         let table_name = table_name.to_string();
         let key = key.to_string();
         let value = value.to_vec();
-        let insert_closure = move |db: Rc<Mutex<Database>>| {
+        let insert_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let mut db = db.lock().await;
+                let mut db = db.write().await;
                 if !db.object_store_names().into_iter().any(|n| n == table_name) {
                     db.close();
 
@@ -194,7 +194,7 @@ impl AsyncKeyValueDB for IndexedDB {
                     .await
                     .map_err(indexed_db_error_to_io_error)?;
 
-                Ok::<_, std::io::Error>(CommandResponse::Insert(()))
+                Ok::<_, std::io::Error>(CommandResponse::Insert)
             }
             .boxed_local()
         };
@@ -208,7 +208,7 @@ impl AsyncKeyValueDB for IndexedDB {
             .await
             .map_err(|_| io::Error::other("Failed to receive command response"))?;
 
-        if let CommandResponse::Insert(()) = response {
+        if let CommandResponse::Insert = response {
             return Ok(old_value);
         }
         if let CommandResponse::Error(e) = response {
@@ -221,9 +221,9 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         let table_name = table_name.to_string();
         let key = key.to_string();
-        let get_closure = move |db: Rc<Mutex<Database>>| {
+        let get_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let db = db.lock().await;
+                let db = db.read().await;
                 let table_name = table_name.to_string();
                 let key = key.to_string();
                 let value = match db
@@ -279,9 +279,9 @@ impl AsyncKeyValueDB for IndexedDB {
             let table_name = table_name.to_string();
             let key = key.to_string();
 
-            let remove_closure = move |db: Rc<Mutex<Database>>| {
+            let remove_closure = move |db: Rc<RwLock<Database>>| {
                 async move {
-                    let mut db = db.lock().await;
+                    let mut db = db.write().await;
                     if !db.object_store_names().into_iter().any(|n| n == table_name) {
                         db.close();
 
@@ -353,9 +353,9 @@ impl AsyncKeyValueDB for IndexedDB {
 
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         let table_name = table_name.to_string();
-        let iter_closure = move |db: Rc<Mutex<Database>>| {
+        let iter_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let db = db.lock().await;
+                let db = db.read().await;
                 let table_name = table_name.to_string();
                 let values = match db
                     .transaction(&[&table_name])
@@ -409,9 +409,9 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        let table_names_closure = |db: Rc<Mutex<Database>>| {
+        let table_names_closure = |db: Rc<RwLock<Database>>| {
             async move {
-                let db = db.lock().await;
+                let db = db.read().await;
                 let table_names = db.object_store_names();
                 Ok::<_, std::io::Error>(CommandResponse::TableNames(table_names))
             }
@@ -440,9 +440,9 @@ impl AsyncKeyValueDB for IndexedDB {
         let name = self.name.clone();
         let version = self.version.clone();
         let table_name = table_name.to_string();
-        let delete_table_closure = move |db: Rc<Mutex<Database>>| {
+        let delete_table_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let mut db = db.lock().await;
+                let mut db = db.write().await;
                 if db.object_store_names().into_iter().any(|n| n == table_name) {
                     db.close();
 
@@ -464,7 +464,7 @@ impl AsyncKeyValueDB for IndexedDB {
                         .into_manual_close();
                 }
 
-                Ok::<_, std::io::Error>(CommandResponse::DeleteTable(()))
+                Ok::<_, std::io::Error>(CommandResponse::DeleteTable)
             }
             .boxed_local()
         };
@@ -478,7 +478,7 @@ impl AsyncKeyValueDB for IndexedDB {
             .await
             .map_err(|_| io::Error::other("Failed to receive command response"))?;
 
-        if let CommandResponse::DeleteTable(()) = response {
+        if let CommandResponse::DeleteTable = response {
             return Ok(());
         }
         if let CommandResponse::Error(e) = response {
@@ -491,9 +491,9 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
         let table_name = table_name.to_string();
         let key = key.to_string();
-        let contains_key_closure = move |db: Rc<Mutex<Database>>| {
+        let contains_key_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let db = db.lock().await;
+                let db = db.read().await;
                 let table_name = table_name.to_string();
                 let key = key.to_string();
                 let contains_key = match db
@@ -542,9 +542,9 @@ impl AsyncKeyValueDB for IndexedDB {
 
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
         let table_name = table_name.to_string();
-        let keys_closure = move |db: Rc<Mutex<Database>>| {
+        let keys_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let db = db.lock().await;
+                let db = db.read().await;
                 let table_name = table_name.to_string();
                 let keys = match db
                     .transaction(&[&table_name])
@@ -596,9 +596,9 @@ impl AsyncKeyValueDB for IndexedDB {
 
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
         let table_name = table_name.to_string();
-        let values_closure = move |db: Rc<Mutex<Database>>| {
+        let values_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let db = db.lock().await;
+                let db = db.read().await;
                 let table_name = table_name.to_string();
                 let values = match db
                     .transaction(&[&table_name])
@@ -651,9 +651,9 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn clear(&self) -> io::Result<()> {
         let name = self.name.clone();
         let version = self.version.clone();
-        let clear_closure = move |db: Rc<Mutex<Database>>| {
+        let clear_closure = move |db: Rc<RwLock<Database>>| {
             async move {
-                let mut db = db.lock().await;
+                let mut db = db.write().await;
                 db.close();
 
                 Factory::get()
@@ -670,7 +670,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
                 version.store(db.version(), std::sync::atomic::Ordering::SeqCst);
 
-                Ok::<_, std::io::Error>(CommandResponse::Clear(()))
+                Ok::<_, std::io::Error>(CommandResponse::Clear)
             }
             .boxed_local()
         };
@@ -684,7 +684,7 @@ impl AsyncKeyValueDB for IndexedDB {
             .await
             .map_err(|_| io::Error::other("Failed to receive command response"))?;
 
-        if let CommandResponse::Clear(()) = response {
+        if let CommandResponse::Clear = response {
             return Ok(());
         }
         if let CommandResponse::Error(e) = response {

@@ -1,4 +1,4 @@
-use crate::io;
+use crate::{MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
@@ -8,7 +8,7 @@ use super::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-pub trait AsyncTransactionalKVDB: Send + Sync + 'static {
+pub trait AsyncTransactionalKVDB: MaybeSendSync + 'static {
     type ReadTransaction: AsyncKVReadTransaction;
     type WriteTransaction: AsyncKVWriteTransaction;
 
@@ -18,7 +18,7 @@ pub trait AsyncTransactionalKVDB: Send + Sync + 'static {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-pub trait AsyncKVReadTransaction: Send + Sync + 'static {
+pub trait AsyncKVReadTransaction: MaybeSendSync + 'static {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     async fn table_names(&self) -> Result<Vec<String>, io::Error>;

@@ -41,3 +41,13 @@ pub mod local_storage;
 
 #[cfg(all(feature = "indexed-db", target_arch = "wasm32"))]
 pub mod indexed_db;
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
+pub trait MaybeSendSync: Send + Sync {}
+#[cfg(any(target_arch = "wasm32", not(feature = "std")))]
+pub trait MaybeSendSync {}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
+impl<T: Send + Sync> MaybeSendSync for T {}
+#[cfg(any(target_arch = "wasm32", not(feature = "std")))]
+impl<T> MaybeSendSync for T {}

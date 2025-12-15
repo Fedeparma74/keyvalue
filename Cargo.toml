@@ -12,6 +12,9 @@ async-trait = { version = "0.1", optional = true }
 futures = { version = "0.3", default-features = false, features = [
     "alloc",
 ], optional = true }
+tokio = { version = "1", default-features = false, features = [
+    "sync",
+], optional = true }
 
 # database
 aws-sdk-s3 = { version = "1", default-features = false, optional = true }
@@ -27,12 +30,12 @@ reqwest = { version = "0.12", optional = true }
 bincode = { version = "2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-redb = { version = "2", optional = true }
+redb = { version = "3", optional = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros",
     "time",
-], optional = true }
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-storage = { version = "0.3", optional = true }
@@ -72,7 +75,14 @@ aws-s3 = [
     "dep:wasm-bindgen-futures",
 ]
 local-storage = ["std", "dep:gloo-storage"]
-indexed-db = ["std", "async", "dep:indexed-db", "dep:js-sys", "dep:wasmt"]
+indexed-db = [
+    "std",
+    "async",
+    "dep:indexed-db",
+    "dep:js-sys",
+    "dep:wasmt",
+    "dep:tokio",
+]
 
 test = [
     "std",

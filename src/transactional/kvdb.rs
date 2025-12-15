@@ -1,8 +1,8 @@
-use crate::io;
+use crate::{MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-pub trait TransactionalKVDB: Send + Sync + 'static {
+pub trait TransactionalKVDB: MaybeSendSync + 'static {
     type ReadTransaction: KVReadTransaction;
     type WriteTransaction: KVWriteTransaction;
 
@@ -10,7 +10,7 @@ pub trait TransactionalKVDB: Send + Sync + 'static {
     fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
 }
 
-pub trait KVReadTransaction: Send + Sync + 'static {
+pub trait KVReadTransaction: MaybeSendSync + 'static {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
     fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;
