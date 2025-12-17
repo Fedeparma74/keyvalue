@@ -13,3 +13,9 @@ pub struct VersionedObject {
     pub value: Vec<u8>,
     pub version: u64,
 }
+
+#[cfg(feature = "transactional")]
+mod transactional;
+
+#[cfg(feature = "transactional")]
+pub use transactional::*;
