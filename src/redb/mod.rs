@@ -1,6 +1,8 @@
 use std::{io, path::Path};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
+#[cfg(feature = "transactional")]
+pub use redb::{ReadTransaction, WriteTransaction};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 
 use crate::KeyValueDB;

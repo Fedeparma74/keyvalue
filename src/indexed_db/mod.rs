@@ -19,6 +19,9 @@ use crate::AsyncKeyValueDB;
 #[cfg(feature = "transactional")]
 mod transactional;
 
+#[cfg(feature = "transactional")]
+pub use self::transactional::{ReadTransaction, WriteTransaction};
+
 type CommandRequestClosure = Box<
     dyn FnOnce(
             Rc<RwLock<Database>>,
