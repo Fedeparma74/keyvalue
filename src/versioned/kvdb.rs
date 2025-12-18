@@ -29,8 +29,8 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
         key: &str,
         value: &[u8],
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let current_value = VersionedKeyValueDB::get(self, table_name, key)?;
-        let new_version = match current_value {
+        let current_object = VersionedKeyValueDB::get(self, table_name, key)?;
+        let new_version = match current_object {
             Some(ref obj) => obj.version.checked_add(1).ok_or(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Version overflow",
@@ -97,7 +97,7 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version,
         };
         let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
@@ -105,9 +105,10 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
 
         let old_value = self.insert(table_name, key, &encoded)?;
         if let Some(old_value) = old_value {
-            let old_object = bincode::decode_from_slice(&old_value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object.0))
+            let (old_object, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&old_value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Some(old_object))
         } else {
             Ok(None)
         }
@@ -116,9 +117,11 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let value = self.get(table_name, key)?;
         if let Some(value) = value {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj.0))
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
@@ -126,9 +129,22 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
     fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let old_value = self.remove(table_name, key)?;
         if let Some(old_value) = old_value {
-            let obj = bincode::decode_from_slice(&old_value, bincode::config::standard())
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&old_value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            let new_obj = VersionedObject {
+                value: None,
+                version: obj.version.checked_add(1).ok_or(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Version overflow",
+                ))?,
+            };
+            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj.0))
+            self.insert(table_name, key, &encoded)?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
@@ -198,7 +214,7 @@ where
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version,
         };
         let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
@@ -206,9 +222,10 @@ where
 
         let old_value = self.insert(table_name, key, &encoded)?;
         if let Some(old_value) = old_value {
-            let old_object = bincode::decode_from_slice(&old_value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object.0))
+            let (old_object, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&old_value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Some(old_object))
         } else {
             Ok(None)
         }
@@ -217,9 +234,11 @@ where
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let value = self.get(table_name, key)?;
         if let Some(value) = value {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj.0))
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
@@ -227,9 +246,22 @@ where
     fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let old_value = self.remove(table_name, key)?;
         if let Some(old_value) = old_value {
-            let obj = bincode::decode_from_slice(&old_value, bincode::config::standard())
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&old_value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            let new_obj = VersionedObject {
+                value: None,
+                version: obj.version.checked_add(1).ok_or(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Version overflow",
+                ))?,
+            };
+            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj.0))
+            self.insert(table_name, key, &encoded)?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }

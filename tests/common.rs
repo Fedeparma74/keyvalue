@@ -226,21 +226,21 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert_eq!(
         db.get(table1, key).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.insert(table1, key, value, 2).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.get(table1, key).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 2,
         })
     );
@@ -248,7 +248,7 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert_eq!(
         db.get(table1, key).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: vec![],
+            value: Some(vec![]),
             version: 3,
         })
     );
@@ -263,14 +263,14 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert_eq!(
         db.get(table1, key1).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value1.to_vec(),
+            value: Some(value1.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.get(table1, key2).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value2.to_vec(),
+            value: Some(value2.to_vec()),
             version: 100,
         })
     );
@@ -280,14 +280,14 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert!(iter.contains(&(
         key1.to_string(),
         keyvalue::VersionedObject {
-            value: value1.to_vec(),
+            value: Some(value1.to_vec()),
             version: 1,
         }
     )));
     assert!(iter.contains(&(
         key2.to_string(),
         keyvalue::VersionedObject {
-            value: value2.to_vec(),
+            value: Some(value2.to_vec()),
             version: 101,
         }
     )));
@@ -296,21 +296,21 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert!(iter.contains(&(
         key.to_string(),
         keyvalue::VersionedObject {
-            value: vec![],
+            value: Some(vec![]),
             version: 3,
         }
     )));
     assert!(iter.contains(&(
         key1.to_string(),
         keyvalue::VersionedObject {
-            value: value1.to_vec(),
+            value: Some(value1.to_vec()),
             version: 1,
         }
     )));
     assert!(iter.contains(&(
         key2.to_string(),
         keyvalue::VersionedObject {
-            value: value2.to_vec(),
+            value: Some(value2.to_vec()),
             version: 101,
         }
     )));
@@ -322,15 +322,15 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     let values = db.values(table1).unwrap();
     assert!(values.len() == 3);
     assert!(values.contains(&keyvalue::VersionedObject {
-        value: vec![],
+        value: Some(vec![]),
         version: 3,
     }));
     assert!(values.contains(&keyvalue::VersionedObject {
-        value: value1.to_vec(),
+        value: Some(value1.to_vec()),
         version: 1,
     }));
     assert!(values.contains(&keyvalue::VersionedObject {
-        value: value2.to_vec(),
+        value: Some(value2.to_vec()),
         version: 101,
     }));
     assert!(db.contains_key(table1, key).unwrap());
@@ -343,21 +343,21 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert_eq!(
         db.get(table2, key).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.insert(table2, key, value, 2).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.get(table2, key).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 2,
         })
     );
@@ -374,7 +374,7 @@ pub fn test_versioned_db<D: keyvalue::VersionedKeyValueDB>(db: &D) {
     assert_eq!(
         db.get(table2, key).unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 2,
         })
     );
@@ -408,21 +408,21 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert_eq!(
         db.get(table1, key).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.insert(table1, key, value, 2).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.get(table1, key).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 2,
         })
     );
@@ -430,7 +430,7 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert_eq!(
         db.get(table1, key).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: vec![],
+            value: Some(vec![]),
             version: 3,
         })
     );
@@ -450,14 +450,14 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert_eq!(
         db.get(table1, key1).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value1.to_vec(),
+            value: Some(value1.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.get(table1, key2).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value2.to_vec(),
+            value: Some(value2.to_vec()),
             version: 100,
         })
     );
@@ -467,14 +467,14 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert!(iter.contains(&(
         key1.to_string(),
         keyvalue::VersionedObject {
-            value: value1.to_vec(),
+            value: Some(value1.to_vec()),
             version: 1,
         }
     )));
     assert!(iter.contains(&(
         key2.to_string(),
         keyvalue::VersionedObject {
-            value: value2.to_vec(),
+            value: Some(value2.to_vec()),
             version: 101,
         }
     )));
@@ -483,21 +483,21 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert!(iter.contains(&(
         key.to_string(),
         keyvalue::VersionedObject {
-            value: vec![],
+            value: Some(vec![]),
             version: 3,
         }
     )));
     assert!(iter.contains(&(
         key1.to_string(),
         keyvalue::VersionedObject {
-            value: value1.to_vec(),
+            value: Some(value1.to_vec()),
             version: 1,
         }
     )));
     assert!(iter.contains(&(
         key2.to_string(),
         keyvalue::VersionedObject {
-            value: value2.to_vec(),
+            value: Some(value2.to_vec()),
             version: 101,
         }
     )));
@@ -509,15 +509,15 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     let values = db.values(table1).await.unwrap();
     assert!(values.len() == 3);
     assert!(values.contains(&keyvalue::VersionedObject {
-        value: vec![],
+        value: Some(vec![]),
         version: 3,
     }));
     assert!(values.contains(&keyvalue::VersionedObject {
-        value: value1.to_vec(),
+        value: Some(value1.to_vec()),
         version: 1,
     }));
     assert!(values.contains(&keyvalue::VersionedObject {
-        value: value2.to_vec(),
+        value: Some(value2.to_vec()),
         version: 101,
     }));
     assert!(db.contains_key(table1, key).await.unwrap());
@@ -530,21 +530,21 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert_eq!(
         db.get(table2, key).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.insert(table2, key, value, 2).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 1,
         })
     );
     assert_eq!(
         db.get(table2, key).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 2,
         })
     );
@@ -566,7 +566,7 @@ pub async fn test_async_versioned_db<D: keyvalue::AsyncVersionedKeyValueDB>(db: 
     assert_eq!(
         db.get(table2, key).await.unwrap(),
         Some(keyvalue::VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version: 2,
         })
     );

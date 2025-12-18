@@ -10,7 +10,7 @@ pub use kvdb::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct VersionedObject {
-    pub value: Vec<u8>,
+    pub value: Option<Vec<u8>>,
     pub version: u64,
 }
 

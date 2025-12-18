@@ -86,8 +86,8 @@ pub trait AsyncKVWriteVersionedTransaction: AsyncKVReadVersionedTransaction {
         key: &str,
         value: &[u8],
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let current_value = AsyncKVReadVersionedTransaction::get(self, table_name, key).await?;
-        let new_version = match current_value {
+        let current_object = AsyncKVReadVersionedTransaction::get(self, table_name, key).await?;
+        let new_version = match current_object {
             Some(ref obj) => obj.version.checked_add(1).ok_or(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Version overflow",
@@ -135,9 +135,10 @@ where
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let value = self.get(table_name, key).await?;
         if let Some(value) = value {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj.0))
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
@@ -146,9 +147,10 @@ where
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
         for (key, value) in self.iter(table_name).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            result.push((key, obj));
         }
         Ok(result)
     }
@@ -164,9 +166,10 @@ where
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
         for (key, value) in self.iter_from_prefix(table_name, prefix).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            result.push((key, obj));
         }
         Ok(result)
     }
@@ -186,9 +189,10 @@ where
     async fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
         let mut values = Vec::new();
         for (_, value) in self.iter(table_name).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            values.push(obj.0);
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            values.push(obj);
         }
         Ok(values)
     }
@@ -208,7 +212,7 @@ where
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: value.to_vec(),
+            value: Some(value.to_vec()),
             version,
         };
         let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
@@ -231,9 +235,22 @@ where
     ) -> Result<Option<VersionedObject>, io::Error> {
         let old_value = self.remove(table_name, key).await?;
         if let Some(old_value) = old_value {
-            let obj = bincode::decode_from_slice(&old_value, bincode::config::standard())
+            let (obj, _): (VersionedObject, _) =
+                bincode::decode_from_slice(&old_value, bincode::config::standard())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            let new_obj = VersionedObject {
+                value: None,
+                version: obj.version.checked_add(1).ok_or(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Version overflow",
+                ))?,
+            };
+            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj.0))
+            self.insert(table_name, key, &encoded).await?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
