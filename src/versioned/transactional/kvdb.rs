@@ -1,5 +1,5 @@
 use crate::{
-    KVReadTransaction, KVWriteTransaction, MaybeSendSync, TransactionalKVDB, io,
+    KVReadTransaction, KVWriteTransaction, MaybeSendSync, TransactionalKVDB, decode, encode, io,
     versioned::VersionedObject,
 };
 #[cfg(not(feature = "std"))]
@@ -108,11 +108,11 @@ where
     type WriteTransaction = T::WriteTransaction;
 
     fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
-        self.begin_read()
+        TransactionalKVDB::begin_read(self)
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
-        self.begin_write()
+        TransactionalKVDB::begin_write(self)
     }
 }
 
@@ -121,28 +121,24 @@ where
     T: KVReadTransaction,
 {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = self.get(table_name, key)?;
+        let value = KVReadTransaction::get(self, table_name, key)?;
         if let Some(value) = value {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(obj))
+            Ok(Some(decode(&value)?))
         } else {
             Ok(None)
         }
     }
+
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter(table_name)? {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj));
+        for (key, value) in KVReadTransaction::iter(self, table_name)? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
+
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        self.table_names()
+        KVReadTransaction::table_names(self)
     }
 
     fn iter_from_prefix(
@@ -151,31 +147,28 @@ where
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter_from_prefix(table_name, prefix)? {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj));
+        for (key, value) in KVReadTransaction::iter_from_prefix(self, table_name, prefix)? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        self.contains_table(table_name)
+        KVReadTransaction::contains_table(self, table_name)
     }
+
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        self.contains_key(table_name, key)
+        KVReadTransaction::contains_key(self, table_name, key)
     }
+
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        self.keys(table_name)
+        KVReadTransaction::keys(self, table_name)
     }
+
     fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
         let mut values = Vec::new();
-        for (_, value) in self.iter(table_name)? {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            values.push(obj);
+        for (_, value) in KVReadTransaction::iter(self, table_name)? {
+            values.push(decode(&value)?);
         }
         Ok(values)
     }
@@ -196,14 +189,10 @@ where
             value: Some(value.to_vec()),
             version,
         };
-        let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let old_value = self.insert(table_name, key, &encoded)?;
+        let old_value = KVWriteTransaction::insert(self, table_name, key, &encode(&obj))?;
         if let Some(old_value) = old_value {
-            let old_object = bincode::decode_from_slice(&old_value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object.0))
+            Ok(Some(decode(&old_value)?))
         } else {
             Ok(None)
         }
@@ -214,11 +203,9 @@ where
         table_name: &str,
         key: &str,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = self.remove(table_name, key)?;
+        let old_value = KVWriteTransaction::remove(self, table_name, key)?;
         if let Some(old_value) = old_value {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let obj = decode(&old_value)?;
 
             let new_obj = VersionedObject {
                 value: None,
@@ -227,26 +214,28 @@ where
                     "Version overflow",
                 ))?,
             };
-            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            self.insert(table_name, key, &encoded)?;
+
+            KVWriteTransaction::insert(self, table_name, key, &encode(&new_obj))?;
 
             Ok(Some(obj))
         } else {
             Ok(None)
         }
     }
+
     fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
-        self.delete_table(table_name)
+        KVWriteTransaction::delete_table(self, table_name)
     }
+
     fn clear(&mut self) -> Result<(), io::Error> {
-        self.clear()
+        KVWriteTransaction::clear(self)
     }
 
     fn commit(self) -> Result<(), io::Error> {
-        self.commit()
+        KVWriteTransaction::commit(self)
     }
+
     fn abort(self) -> Result<(), io::Error> {
-        self.abort()
+        KVWriteTransaction::abort(self)
     }
 }

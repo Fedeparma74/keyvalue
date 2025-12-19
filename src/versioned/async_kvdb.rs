@@ -1,4 +1,4 @@
-use crate::{AsyncKeyValueDB, MaybeSendSync, io};
+use crate::{AsyncKeyValueDB, MaybeSendSync, decode, encode, io};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -110,27 +110,19 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
             value: Some(value.to_vec()),
             version,
         };
-        let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let old_value = self.insert(table_name, key, &encoded).await?;
+        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)).await?;
         if let Some(old_value) = old_value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object))
+            Ok(Some(decode(&old_value)?))
         } else {
             Ok(None)
         }
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = self.get(table_name, key).await?;
+        let value = AsyncKeyValueDB::get(self, table_name, key).await?;
         if let Some(value) = value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object))
+            Ok(Some(decode(&value)?))
         } else {
             Ok(None)
         }
@@ -140,39 +132,34 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
         table_name: &str,
         key: &str,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = self.remove(table_name, key).await?;
+        let old_value = AsyncKeyValueDB::remove(self, table_name, key).await?;
         if let Some(old_value) = old_value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let obj = decode(&old_value)?;
 
             let new_obj = VersionedObject {
                 value: None,
-                version: old_object.version.checked_add(1).ok_or(io::Error::new(
+                version: obj.version.checked_add(1).ok_or(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Version overflow",
                 ))?,
             };
-            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            self.insert(table_name, key, &encoded).await?;
 
-            Ok(Some(old_object))
+            AsyncKeyValueDB::insert(self, table_name, key, &encode(&new_obj)).await?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
     }
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter(table_name).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in AsyncKeyValueDB::iter(self, table_name).await? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        self.table_names().await
+        AsyncKeyValueDB::table_names(self).await
     }
 
     async fn iter_from_prefix(
@@ -181,37 +168,33 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter_from_prefix(table_name, prefix).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in AsyncKeyValueDB::iter_from_prefix(self, table_name, prefix).await? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
 
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        self.contains_table(table_name).await
+        AsyncKeyValueDB::contains_table(self, table_name).await
     }
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        self.contains_key(table_name, key).await
+        AsyncKeyValueDB::contains_key(self, table_name, key).await
     }
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        self.keys(table_name).await
+        AsyncKeyValueDB::keys(self, table_name).await
     }
     async fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
         let mut values = Vec::new();
-        for (_, value) in self.iter(table_name).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            values.push(obj.0);
+        for (_, value) in AsyncKeyValueDB::iter(self, table_name).await? {
+            values.push(decode(&value)?);
         }
         Ok(values)
     }
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        self.delete_table(table_name).await
+        AsyncKeyValueDB::delete_table(self, table_name).await
     }
     async fn clear(&self) -> Result<(), io::Error> {
-        self.clear().await
+        AsyncKeyValueDB::clear(self).await
     }
 }
 
@@ -232,27 +215,19 @@ where
             value: Some(value.to_vec()),
             version,
         };
-        let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let old_value = self.insert(table_name, key, &encoded).await?;
+        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)).await?;
         if let Some(old_value) = old_value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object))
+            Ok(Some(decode(&old_value)?))
         } else {
             Ok(None)
         }
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = self.get(table_name, key).await?;
+        let value = AsyncKeyValueDB::get(self, table_name, key).await?;
         if let Some(value) = value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object))
+            Ok(Some(decode(&value)?))
         } else {
             Ok(None)
         }
@@ -262,39 +237,34 @@ where
         table_name: &str,
         key: &str,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = self.remove(table_name, key).await?;
+        let old_value = AsyncKeyValueDB::remove(self, table_name, key).await?;
         if let Some(old_value) = old_value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let obj = decode(&old_value)?;
 
             let new_obj = VersionedObject {
                 value: None,
-                version: old_object.version.checked_add(1).ok_or(io::Error::new(
+                version: obj.version.checked_add(1).ok_or(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Version overflow",
                 ))?,
             };
-            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            self.insert(table_name, key, &encoded).await?;
 
-            Ok(Some(old_object))
+            AsyncKeyValueDB::insert(self, table_name, key, &encode(&new_obj)).await?;
+
+            Ok(Some(obj))
         } else {
             Ok(None)
         }
     }
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter(table_name).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in AsyncKeyValueDB::iter(self, table_name).await? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        self.table_names().await
+        AsyncKeyValueDB::table_names(self).await
     }
 
     async fn iter_from_prefix(
@@ -303,37 +273,33 @@ where
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter_from_prefix(table_name, prefix).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in AsyncKeyValueDB::iter_from_prefix(self, table_name, prefix).await? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
 
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        self.contains_table(table_name).await
+        AsyncKeyValueDB::contains_table(self, table_name).await
     }
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        self.contains_key(table_name, key).await
+        AsyncKeyValueDB::contains_key(self, table_name, key).await
     }
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        self.keys(table_name).await
+        AsyncKeyValueDB::keys(self, table_name).await
     }
     async fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
         let mut values = Vec::new();
-        for (_, value) in self.iter(table_name).await? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            values.push(obj.0);
+        for (_, value) in AsyncKeyValueDB::iter(self, table_name).await? {
+            values.push(decode(&value)?);
         }
         Ok(values)
     }
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        self.delete_table(table_name).await
+        AsyncKeyValueDB::delete_table(self, table_name).await
     }
     async fn clear(&self) -> Result<(), io::Error> {
-        self.clear().await
+        AsyncKeyValueDB::clear(self).await
     }
 }
 

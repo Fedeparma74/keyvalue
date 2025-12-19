@@ -1,4 +1,4 @@
-use crate::{KeyValueDB, MaybeSendSync, io};
+use crate::{KeyValueDB, MaybeSendSync, decode, encode, io};
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
@@ -100,38 +100,27 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
             value: Some(value.to_vec()),
             version,
         };
-        let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let old_value = self.insert(table_name, key, &encoded)?;
+        let old_value = KeyValueDB::insert(self, table_name, key, &encode(&obj))?;
         if let Some(old_value) = old_value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object))
+            Ok(Some(decode(&old_value)?))
         } else {
             Ok(None)
         }
     }
 
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = self.get(table_name, key)?;
+        let value = KeyValueDB::get(self, table_name, key)?;
         if let Some(value) = value {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-            Ok(Some(obj))
+            Ok(Some(decode(&value)?))
         } else {
             Ok(None)
         }
     }
     fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = self.remove(table_name, key)?;
+        let old_value = KeyValueDB::remove(self, table_name, key)?;
         if let Some(old_value) = old_value {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let obj = decode(&old_value)?;
 
             let new_obj = VersionedObject {
                 value: None,
@@ -140,9 +129,8 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
                     "Version overflow",
                 ))?,
             };
-            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            self.insert(table_name, key, &encoded)?;
+
+            KeyValueDB::insert(self, table_name, key, &encode(&new_obj))?;
 
             Ok(Some(obj))
         } else {
@@ -151,15 +139,13 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
     }
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter(table_name)? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in KeyValueDB::iter(self, table_name)? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        self.table_names()
+        KeyValueDB::table_names(self)
     }
 
     fn iter_from_prefix(
@@ -168,37 +154,33 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter_from_prefix(table_name, prefix)? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in KeyValueDB::iter_from_prefix(self, table_name, prefix)? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        self.contains_table(table_name)
+        KeyValueDB::contains_table(self, table_name)
     }
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        self.contains_key(table_name, key)
+        KeyValueDB::contains_key(self, table_name, key)
     }
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        self.keys(table_name)
+        KeyValueDB::keys(self, table_name)
     }
     fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
         let mut values = Vec::new();
-        for (_, value) in self.iter(table_name)? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            values.push(obj.0);
+        for (_, value) in KeyValueDB::iter(self, table_name)? {
+            values.push(decode(&value)?);
         }
         Ok(values)
     }
     fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        self.delete_table(table_name)
+        KeyValueDB::delete_table(self, table_name)
     }
     fn clear(&self) -> Result<(), io::Error> {
-        self.clear()
+        KeyValueDB::clear(self)
     }
 }
 
@@ -217,38 +199,27 @@ where
             value: Some(value.to_vec()),
             version,
         };
-        let encoded = bincode::encode_to_vec(&obj, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let old_value = self.insert(table_name, key, &encoded)?;
+        let old_value = KeyValueDB::insert(self, table_name, key, &encode(&obj))?;
         if let Some(old_value) = old_value {
-            let (old_object, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some(old_object))
+            Ok(Some(decode(&old_value)?))
         } else {
             Ok(None)
         }
     }
 
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = self.get(table_name, key)?;
+        let value = KeyValueDB::get(self, table_name, key)?;
         if let Some(value) = value {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-            Ok(Some(obj))
+            Ok(Some(decode(&value)?))
         } else {
             Ok(None)
         }
     }
     fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = self.remove(table_name, key)?;
+        let old_value = KeyValueDB::remove(self, table_name, key)?;
         if let Some(old_value) = old_value {
-            let (obj, _): (VersionedObject, _) =
-                bincode::decode_from_slice(&old_value, bincode::config::standard())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let obj = decode(&old_value)?;
 
             let new_obj = VersionedObject {
                 value: None,
@@ -257,9 +228,8 @@ where
                     "Version overflow",
                 ))?,
             };
-            let encoded = bincode::encode_to_vec(&new_obj, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            self.insert(table_name, key, &encoded)?;
+
+            KeyValueDB::insert(self, table_name, key, &encode(&new_obj))?;
 
             Ok(Some(obj))
         } else {
@@ -268,15 +238,13 @@ where
     }
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter(table_name)? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in KeyValueDB::iter(self, table_name)? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        self.table_names()
+        KeyValueDB::table_names(self)
     }
 
     fn iter_from_prefix(
@@ -285,37 +253,33 @@ where
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
-        for (key, value) in self.iter_from_prefix(table_name, prefix)? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            result.push((key, obj.0));
+        for (key, value) in KeyValueDB::iter_from_prefix(self, table_name, prefix)? {
+            result.push((key, decode(&value)?));
         }
         Ok(result)
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        self.contains_table(table_name)
+        KeyValueDB::contains_table(self, table_name)
     }
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        self.contains_key(table_name, key)
+        KeyValueDB::contains_key(self, table_name, key)
     }
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        self.keys(table_name)
+        KeyValueDB::keys(self, table_name)
     }
     fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
         let mut values = Vec::new();
-        for (_, value) in self.iter(table_name)? {
-            let obj = bincode::decode_from_slice(&value, bincode::config::standard())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            values.push(obj.0);
+        for (_, value) in KeyValueDB::iter(self, table_name)? {
+            values.push(decode(&value)?);
         }
         Ok(values)
     }
     fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        self.delete_table(table_name)
+        KeyValueDB::delete_table(self, table_name)
     }
     fn clear(&self) -> Result<(), io::Error> {
-        self.clear()
+        KeyValueDB::clear(self)
     }
 }
 
