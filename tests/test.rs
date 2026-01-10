@@ -172,6 +172,51 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_transactional_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_transactional_sqlite_db");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_transactional_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::check_test_data_async(&db).await;
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
+            .await
+            .unwrap();
+        keyvalue::AsyncKVWriteTransaction::clear(&mut write)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&write)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKVWriteTransaction::commit(write)
+            .await
+            .unwrap();
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[cfg(all(feature = "async", feature = "aws-s3"))]
     #[tokio::test]
     async fn test_async_aws_s3() {

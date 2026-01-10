@@ -33,6 +33,9 @@ pub mod in_memory;
 #[cfg(feature = "redb")]
 pub mod redb;
 
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+
 #[cfg(feature = "aws-s3")]
 pub mod aws_s3;
 
