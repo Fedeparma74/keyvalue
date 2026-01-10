@@ -27,7 +27,7 @@ impl AsyncKVReadTransaction for ReadTransaction {
             return Ok(None);
         }
 
-        let sql = format!("SELECT value FROM {} WHERE key = ?", table);
+        let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
         let stmt = self
             .conn
             .prepare(sql.as_str())
@@ -49,7 +49,7 @@ impl AsyncKVReadTransaction for ReadTransaction {
             return Ok(Vec::new());
         }
 
-        let sql = format!("SELECT key, value FROM {}", table);
+        let sql = format!("SELECT key, value FROM \"{}\"", table);
         let stmt = self
             .conn
             .prepare(sql.as_str())
@@ -92,7 +92,7 @@ impl AsyncKVReadTransaction for WriteTransaction {
             return Ok(None);
         }
 
-        let sql = format!("SELECT value FROM {} WHERE key = ?", table);
+        let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
         let stmt = self
             .conn
             .prepare(sql.as_str())
@@ -114,7 +114,7 @@ impl AsyncKVReadTransaction for WriteTransaction {
             return Ok(Vec::new());
         }
 
-        let sql = format!("SELECT key, value FROM {}", table);
+        let sql = format!("SELECT key, value FROM \"{}\"", table);
         let stmt = self
             .conn
             .prepare(sql.as_str())
@@ -163,7 +163,7 @@ impl AsyncKVWriteTransaction for WriteTransaction {
         let old = self.get(table, key).await?;
 
         let insert_sql = format!(
-            "INSERT OR REPLACE INTO {} (key, value) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
             table
         );
         self.conn
@@ -180,7 +180,7 @@ impl AsyncKVWriteTransaction for WriteTransaction {
         }
 
         let old = self.get(table, key).await?;
-        let sql = format!("DELETE FROM {} WHERE key = ?", table);
+        let sql = format!("DELETE FROM \"{}\" WHERE key = ?", table);
         self.conn
             .execute(sql.as_str(), [key])
             .await
@@ -194,7 +194,7 @@ impl AsyncKVWriteTransaction for WriteTransaction {
             return Ok(());
         }
 
-        let sql = format!("DROP TABLE {}", table);
+        let sql = format!("DROP TABLE \"{}\"", table);
         self.conn
             .execute(sql.as_str(), ())
             .await

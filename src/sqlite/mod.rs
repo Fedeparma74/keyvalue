@@ -25,7 +25,10 @@ async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error>
 
 async fn ensure_table(conn: &Connection, table: &str) -> Result<(), io::Error> {
     if !table_exists(conn, table).await? {
-        let sql = format!("CREATE TABLE {} (key TEXT PRIMARY KEY, value BLOB)", table);
+        let sql = format!(
+            "CREATE TABLE \"{}\" (key TEXT PRIMARY KEY, value BLOB)",
+            table
+        );
         conn.execute(&sql, ()).await.map_err(io::Error::other)?;
     }
     Ok(())
@@ -54,7 +57,7 @@ impl AsyncKeyValueDB for SqliteDB {
         ensure_table(&tx, table).await?;
         let old = self.get(table, key).await?; // Reuse get for old value; it's read-only and safe
         let sql = format!(
-            "INSERT OR REPLACE INTO {} (key, value) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
             table
         );
         tx.execute(&sql, params![key, value])
@@ -69,7 +72,7 @@ impl AsyncKeyValueDB for SqliteDB {
         if !table_exists(&conn, table).await? {
             return Ok(None);
         }
-        let sql = format!("SELECT value FROM {} WHERE key = ?", table);
+        let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
         let stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([key]).await.map_err(io::Error::other)?;
         if let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -88,7 +91,7 @@ impl AsyncKeyValueDB for SqliteDB {
             return Ok(None);
         }
         let old = self.get(table, key).await?; // Reuse get for old value
-        let sql = format!("DELETE FROM {} WHERE key = ?", table);
+        let sql = format!("DELETE FROM \"{}\" WHERE key = ?", table);
         tx.execute(&sql, [key]).await.map_err(io::Error::other)?;
         tx.commit().await.map_err(io::Error::other)?;
         Ok(old)
@@ -99,7 +102,7 @@ impl AsyncKeyValueDB for SqliteDB {
         if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
-        let sql = format!("SELECT key, value FROM {}", table);
+        let sql = format!("SELECT key, value FROM \"{}\"", table);
         let stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut result = Vec::new();
@@ -135,7 +138,10 @@ impl AsyncKeyValueDB for SqliteDB {
         if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
-        let sql = format!("SELECT key, value FROM {} WHERE key LIKE ? || '%'", table);
+        let sql = format!(
+            "SELECT key, value FROM \"{}\" WHERE key LIKE ? || '%'",
+            table
+        );
         let stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([prefix]).await.map_err(io::Error::other)?;
         let mut result = Vec::new();
@@ -157,7 +163,7 @@ impl AsyncKeyValueDB for SqliteDB {
         if !table_exists(&conn, table).await? {
             return Ok(false);
         }
-        let sql = format!("SELECT EXISTS (SELECT 1 FROM {} WHERE key = ?)", table);
+        let sql = format!("SELECT EXISTS (SELECT 1 FROM \"{}\" WHERE key = ?)", table);
         let stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([key]).await.map_err(io::Error::other)?;
         if let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -173,7 +179,7 @@ impl AsyncKeyValueDB for SqliteDB {
         if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
-        let sql = format!("SELECT key FROM {}", table);
+        let sql = format!("SELECT key FROM \"{}\"", table);
         let stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut keys = Vec::new();
@@ -189,7 +195,7 @@ impl AsyncKeyValueDB for SqliteDB {
         if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
-        let sql = format!("SELECT value FROM {}", table);
+        let sql = format!("SELECT value FROM \"{}\"", table);
         let stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut values = Vec::new();
@@ -204,7 +210,7 @@ impl AsyncKeyValueDB for SqliteDB {
         let conn = self.inner.connect().map_err(io::Error::other)?;
         let tx = conn.transaction().await.map_err(io::Error::other)?;
         if table_exists(&tx, table).await? {
-            let sql = format!("DROP TABLE {}", table);
+            let sql = format!("DROP TABLE \"{}\"", table);
             tx.execute(&sql, ()).await.map_err(io::Error::other)?;
         }
         tx.commit().await.map_err(io::Error::other)?;
@@ -216,7 +222,7 @@ impl AsyncKeyValueDB for SqliteDB {
         let tx = conn.transaction().await.map_err(io::Error::other)?;
         let tables = self.table_names().await?; // Reuse table_names; it's read-only
         for t in tables {
-            let sql = format!("DROP TABLE {}", t);
+            let sql = format!("DROP TABLE \"{}\"", t);
             tx.execute(&sql, ()).await.map_err(io::Error::other)?;
         }
         tx.commit().await.map_err(io::Error::other)?;
