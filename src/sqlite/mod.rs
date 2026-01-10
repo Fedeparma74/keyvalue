@@ -1,7 +1,7 @@
 use std::{io, path::Path};
 
 use async_trait::async_trait;
-use libsql::{Builder, Connection, Database, params};
+use libsql::{Builder, Connection, Database, TransactionBehavior, params};
 
 use crate::AsyncKeyValueDB;
 
@@ -40,9 +40,47 @@ impl SqliteDB {
             .build()
             .await
             .map_err(io::Error::other)?;
+
+        let conn = inner.connect().map_err(io::Error::other)?;
+
+        // Set WAL mode
+        let mut rows = conn
+            .query("PRAGMA journal_mode = WAL", ())
+            .await
+            .map_err(io::Error::other)?;
+
+        // consume the result to confirm it worked
+        if let Some(row) = rows.next().await.map_err(io::Error::other)? {
+            let mode: String = row.get(0).map_err(io::Error::other)?;
+            if mode != "wal" {
+                return Err(io::Error::other(format!(
+                    "Failed to set WAL mode, got: {}",
+                    mode
+                )));
+            }
+        }
+
+        // Set synchronous = NORMAL
+        let mut rows = conn
+            .query("PRAGMA synchronous = NORMAL", ())
+            .await
+            .map_err(io::Error::other)?;
+
+        if let Some(row) = rows.next().await.map_err(io::Error::other)? {
+            let value: i64 = row.get(0).map_err(io::Error::other)?;
+            if value != 1 {
+                // NORMAL == 1 in SQLite
+                return Err(io::Error::other(format!(
+                    "Failed to set synchronous = NORMAL, got: {}",
+                    value
+                )));
+            }
+        }
+
         Ok(Self { inner })
     }
 }
+
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKeyValueDB for SqliteDB {
@@ -53,7 +91,10 @@ impl AsyncKeyValueDB for SqliteDB {
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
         let conn = self.inner.connect().map_err(io::Error::other)?;
-        let tx = conn.transaction().await.map_err(io::Error::other)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(io::Error::other)?;
         ensure_table(&tx, table).await?;
         let old = self.get(table, key).await?; // Reuse get for old value; it's read-only and safe
         let sql = format!(
@@ -85,7 +126,10 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         let conn = self.inner.connect().map_err(io::Error::other)?;
-        let tx = conn.transaction().await.map_err(io::Error::other)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(io::Error::other)?;
         if !table_exists(&tx, table).await? {
             tx.commit().await.map_err(io::Error::other)?; // Commit even if no-op
             return Ok(None);
@@ -208,7 +252,10 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn delete_table(&self, table: &str) -> Result<(), io::Error> {
         let conn = self.inner.connect().map_err(io::Error::other)?;
-        let tx = conn.transaction().await.map_err(io::Error::other)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(io::Error::other)?;
         if table_exists(&tx, table).await? {
             let sql = format!("DROP TABLE \"{}\"", table);
             tx.execute(&sql, ()).await.map_err(io::Error::other)?;
@@ -219,7 +266,10 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn clear(&self) -> Result<(), io::Error> {
         let conn = self.inner.connect().map_err(io::Error::other)?;
-        let tx = conn.transaction().await.map_err(io::Error::other)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(io::Error::other)?;
         let tables = self.table_names().await?; // Reuse table_names; it's read-only
         for t in tables {
             let sql = format!("DROP TABLE \"{}\"", t);

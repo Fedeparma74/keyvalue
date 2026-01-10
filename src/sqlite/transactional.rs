@@ -1,7 +1,7 @@
 use std::io;
 
 use async_trait::async_trait;
-use libsql::{Connection, Transaction};
+use libsql::{Connection, Transaction, TransactionBehavior};
 
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
@@ -232,7 +232,10 @@ impl AsyncTransactionalKVDB for SqliteDB {
 
     async fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
         let conn = self.inner.connect().unwrap();
-        let transaction = conn.transaction().await.map_err(io::Error::other)?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(io::Error::other)?;
         Ok(WriteTransaction { conn, transaction })
     }
 }

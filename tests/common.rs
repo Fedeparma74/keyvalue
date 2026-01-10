@@ -797,6 +797,8 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     assert!(read.keys(table1).await.unwrap().is_empty());
     assert!(read.values(table1).await.unwrap().is_empty());
 
+    drop(read);
+
     let mut write = db.begin_write().await.unwrap();
     assert!(write.get(table1, key).await.unwrap().is_none());
     assert!(
@@ -814,7 +816,7 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     assert!(write.values(table1).await.unwrap().is_empty());
     assert!(write.delete_table(table1).await.is_ok());
     assert!(write.clear().await.is_ok());
-    assert!(write.commit().await.is_ok());
+    write.commit().await.unwrap();
 
     let read = db.begin_read().await.unwrap();
     assert!(read.get(table1, key).await.unwrap().is_none());
@@ -825,12 +827,16 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     assert!(read.keys(table1).await.unwrap().is_empty());
     assert!(read.values(table1).await.unwrap().is_empty());
 
+    drop(read);
+
     let mut write = db.begin_write().await.unwrap();
     assert!(write.insert(table1, key, value).await.unwrap().is_none());
     assert_eq!(write.get(table1, key).await.unwrap(), Some(value.to_vec()));
 
     let read = db.begin_read().await.unwrap();
     assert_eq!(read.get(table1, key).await.unwrap(), None);
+
+    drop(read);
 
     assert_eq!(
         write.insert(table1, key, value).await.unwrap(),
@@ -843,6 +849,8 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     let read = db.begin_read().await.unwrap();
     assert_eq!(read.get(table1, key).await.unwrap(), Some(value.to_vec()));
 
+    drop(read);
+
     let mut write = db.begin_write().await.unwrap();
     assert!(write.insert(table1, key, &[]).await.unwrap().is_some());
     assert_eq!(write.get(table1, key).await.unwrap(), Some(vec![]));
@@ -852,6 +860,8 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     let read = db.begin_read().await.unwrap();
     assert_eq!(read.get(table1, key).await.unwrap(), Some(vec![]));
 
+    drop(read);
+
     let mut write = db.begin_write().await.unwrap();
     assert!(write.remove(table1, key).await.unwrap().is_some());
     assert!(write.get(table1, key).await.unwrap().is_none());
@@ -859,10 +869,14 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     let read = db.begin_read().await.unwrap();
     assert_eq!(read.get(table1, key).await.unwrap(), Some(vec![]));
 
+    drop(read);
+
     write.commit().await.unwrap();
 
     let read = db.begin_read().await.unwrap();
     assert!(read.get(table1, key).await.unwrap().is_none());
+
+    drop(read);
 
     let prefix = TEST_PREFIX;
     let (_, key1, value1) = TEST_DATA[1];
@@ -877,31 +891,33 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
 
     write.commit().await.unwrap();
 
-    let read = db.begin_read().await.unwrap();
-    let iter = read.iter_from_prefix(table1, prefix).await.unwrap();
-    assert!(iter.len() == 2);
-    assert!(iter.contains(&(key1.to_string(), value1.to_vec())));
-    assert!(iter.contains(&(key2.to_string(), value2.to_vec())));
+    {
+        let read = db.begin_read().await.unwrap();
+        let iter = read.iter_from_prefix(table1, prefix).await.unwrap();
+        assert!(iter.len() == 2);
+        assert!(iter.contains(&(key1.to_string(), value1.to_vec())));
+        assert!(iter.contains(&(key2.to_string(), value2.to_vec())));
 
-    let iter = read.iter(table1).await.unwrap();
-    assert!(iter.len() == 2);
-    assert!(iter.contains(&(key1.to_string(), value1.to_vec())));
-    assert!(iter.contains(&(key2.to_string(), value2.to_vec())));
+        let iter = read.iter(table1).await.unwrap();
+        assert!(iter.len() == 2);
+        assert!(iter.contains(&(key1.to_string(), value1.to_vec())));
+        assert!(iter.contains(&(key2.to_string(), value2.to_vec())));
 
-    let keys = read.keys(table1).await.unwrap();
-    assert!(keys.len() == 2);
-    assert!(keys.contains(&key1.to_string()));
-    assert!(keys.contains(&key2.to_string()));
+        let keys = read.keys(table1).await.unwrap();
+        assert!(keys.len() == 2);
+        assert!(keys.contains(&key1.to_string()));
+        assert!(keys.contains(&key2.to_string()));
 
-    let values = read.values(table1).await.unwrap();
-    assert!(values.len() == 2);
-    assert!(values.contains(&value1.to_vec()));
-    assert!(values.contains(&value2.to_vec()));
+        let values = read.values(table1).await.unwrap();
+        assert!(values.len() == 2);
+        assert!(values.contains(&value1.to_vec()));
+        assert!(values.contains(&value2.to_vec()));
 
-    assert!(read.contains_key(table1, key1).await.unwrap());
-    assert!(read.contains_key(table1, key2).await.unwrap());
-    assert!(!read.contains_key(table1, "non-existent").await.unwrap());
-    assert_eq!(read.table_names().await.unwrap(), vec![table1.to_string()]);
+        assert!(read.contains_key(table1, key1).await.unwrap());
+        assert!(read.contains_key(table1, key2).await.unwrap());
+        assert!(!read.contains_key(table1, "non-existent").await.unwrap());
+        assert_eq!(read.table_names().await.unwrap(), vec![table1.to_string()]);
+    }
 
     let (table2, key, value) = TEST_DATA[3];
 
@@ -916,7 +932,7 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
     write.commit().await.unwrap();
 
     let mut write = db.begin_write().await.unwrap();
-    assert!(write.delete_table(table1).await.is_ok());
+    write.delete_table(table1).await.unwrap();
     assert!(write.get(table1, key1).await.unwrap().is_none());
     assert!(write.get(table1, key2).await.unwrap().is_none());
     assert!(
@@ -937,26 +953,28 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
 
     write.commit().await.unwrap();
 
-    let read = db.begin_read().await.unwrap();
-    assert!(read.get(table1, key1).await.unwrap().is_none());
-    assert!(read.get(table1, key2).await.unwrap().is_none());
-    assert!(
-        read.iter_from_prefix(table1, prefix)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(read.iter(table1).await.unwrap().is_empty());
-    assert!(read.keys(table1).await.unwrap().is_empty());
-    assert!(read.values(table1).await.unwrap().is_empty());
-    assert!(!read.contains_key(table1, key1).await.unwrap());
-    assert!(!read.contains_key(table1, key2).await.unwrap());
-    assert!(!read.contains_key(table1, "non-existent").await.unwrap());
-    assert_eq!(read.get(table2, key).await.unwrap(), Some(value.to_vec()));
-    assert_eq!(read.table_names().await.unwrap(), vec![table2.to_string()]);
+    {
+        let read = db.begin_read().await.unwrap();
+        assert!(read.get(table1, key1).await.unwrap().is_none());
+        assert!(read.get(table1, key2).await.unwrap().is_none());
+        assert!(
+            read.iter_from_prefix(table1, prefix)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(read.iter(table1).await.unwrap().is_empty());
+        assert!(read.keys(table1).await.unwrap().is_empty());
+        assert!(read.values(table1).await.unwrap().is_empty());
+        assert!(!read.contains_key(table1, key1).await.unwrap());
+        assert!(!read.contains_key(table1, key2).await.unwrap());
+        assert!(!read.contains_key(table1, "non-existent").await.unwrap());
+        assert_eq!(read.get(table2, key).await.unwrap(), Some(value.to_vec()));
+        assert_eq!(read.table_names().await.unwrap(), vec![table2.to_string()]);
+    }
 
     let mut write = db.begin_write().await.unwrap();
-    assert!(write.clear().await.is_ok());
+    write.clear().await.unwrap();
     assert!(write.get(table2, key).await.unwrap().is_none());
     assert!(
         write
@@ -975,21 +993,23 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
 
     write.commit().await.unwrap();
 
-    let read = db.begin_read().await.unwrap();
-    assert!(read.get(table2, key).await.unwrap().is_none());
-    assert!(
-        read.iter_from_prefix(table1, prefix)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(read.iter(table2).await.unwrap().is_empty());
-    assert!(read.keys(table1).await.unwrap().is_empty());
-    assert!(read.values(table1).await.unwrap().is_empty());
-    assert!(!read.contains_key(table1, key1).await.unwrap());
-    assert!(!read.contains_key(table1, key2).await.unwrap());
-    assert!(!read.contains_key(table1, "non-existent").await.unwrap());
-    assert!(read.table_names().await.unwrap().is_empty());
+    {
+        let read = db.begin_read().await.unwrap();
+        assert!(read.get(table2, key).await.unwrap().is_none());
+        assert!(
+            read.iter_from_prefix(table1, prefix)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(read.iter(table2).await.unwrap().is_empty());
+        assert!(read.keys(table1).await.unwrap().is_empty());
+        assert!(read.values(table1).await.unwrap().is_empty());
+        assert!(!read.contains_key(table1, key1).await.unwrap());
+        assert!(!read.contains_key(table1, key2).await.unwrap());
+        assert!(!read.contains_key(table1, "non-existent").await.unwrap());
+        assert!(read.table_names().await.unwrap().is_empty());
+    }
 
     let mut write = db.begin_write().await.unwrap();
     assert!(write.insert(table1, key1, value1).await.unwrap().is_none());
