@@ -23,7 +23,7 @@ async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error>
 async fn ensure_table(conn: &Connection, table: &str) -> Result<(), io::Error> {
     if !table_exists(conn, table).await? {
         let sql = format!(
-            "CREATE TABLE \"{}\" (key TEXT PRIMARY KEY, value BLOB)",
+            "CREATE TABLE IF NOT EXISTS \"{}\" (key TEXT PRIMARY KEY, value BLOB)",
             table
         );
         conn.execute(&sql, ()).await.map_err(io::Error::other)?;
