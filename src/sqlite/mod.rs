@@ -1,7 +1,7 @@
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use turso::{Builder, Connection, Database, params};
+use turso::{Builder, Connection, params};
 
 use crate::AsyncKeyValueDB;
 #[cfg(feature = "transactional")]
@@ -10,7 +10,7 @@ mod transactional;
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 #[derive(Debug)]
 pub struct SqliteDB {
-    inner: Database,
+    conn: Arc<Connection>,
 }
 
 async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error> {
@@ -72,7 +72,9 @@ impl SqliteDB {
             }
         }
 
-        Ok(Self { inner })
+        Ok(Self {
+            conn: Arc::new(conn),
+        })
     }
 }
 
@@ -85,30 +87,33 @@ impl AsyncKeyValueDB for SqliteDB {
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        conn.execute("BEGIN CONCURRENT", ())
+        self.conn
+            .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
-        ensure_table(&conn, table).await?;
+        ensure_table(&self.conn, table).await?;
         let old = self.get(table, key).await?; // Reuse get for old value; it's read-only and safe
         let sql = format!(
             "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
             table
         );
-        conn.execute(&sql, params![key, value])
+        self.conn
+            .execute(&sql, params![key, value])
             .await
             .map_err(io::Error::other)?;
-        conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
+        self.conn
+            .execute("COMMIT", ())
+            .await
+            .map_err(io::Error::other)?;
         Ok(old)
     }
 
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
+        if !table_exists(&self.conn, table).await? {
             return Ok(None);
         }
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
-        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([key]).await.map_err(io::Error::other)?;
         if let Some(row) = rows.next().await.map_err(io::Error::other)? {
             let blob: Vec<u8> = row.get(0).map_err(io::Error::other)?;
@@ -119,28 +124,36 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        conn.execute("BEGIN CONCURRENT", ())
+        self.conn
+            .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
-            conn.execute("COMMIT", ()).await.map_err(io::Error::other)?; // Commit even if no-op
+        if !table_exists(&self.conn, table).await? {
+            self.conn
+                .execute("COMMIT", ())
+                .await
+                .map_err(io::Error::other)?; // Commit even if no-op
             return Ok(None);
         }
         let old = self.get(table, key).await?; // Reuse get for old value
         let sql = format!("DELETE FROM \"{}\" WHERE key = ?", table);
-        conn.execute(&sql, [key]).await.map_err(io::Error::other)?;
-        conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
+        self.conn
+            .execute(&sql, [key])
+            .await
+            .map_err(io::Error::other)?;
+        self.conn
+            .execute("COMMIT", ())
+            .await
+            .map_err(io::Error::other)?;
         Ok(old)
     }
 
     async fn iter(&self, table: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
+        if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!("SELECT key, value FROM \"{}\"", table);
-        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -152,9 +165,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
         let sql = "SELECT name FROM sqlite_master WHERE type='table'";
-        let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -169,15 +181,14 @@ impl AsyncKeyValueDB for SqliteDB {
         table: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
+        if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!(
             "SELECT key, value FROM \"{}\" WHERE key LIKE ? || '%'",
             table
         );
-        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([prefix]).await.map_err(io::Error::other)?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -189,17 +200,15 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        table_exists(&conn, table).await
+        table_exists(&self.conn, table).await
     }
 
     async fn contains_key(&self, table: &str, key: &str) -> Result<bool, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
+        if !table_exists(&self.conn, table).await? {
             return Ok(false);
         }
         let sql = format!("SELECT EXISTS (SELECT 1 FROM \"{}\" WHERE key = ?)", table);
-        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([key]).await.map_err(io::Error::other)?;
         if let Some(row) = rows.next().await.map_err(io::Error::other)? {
             let exists: i64 = row.get(0).map_err(io::Error::other)?;
@@ -210,12 +219,11 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn keys(&self, table: &str) -> Result<Vec<String>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
+        if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!("SELECT key FROM \"{}\"", table);
-        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut keys = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -226,12 +234,11 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn values(&self, table: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        if !table_exists(&conn, table).await? {
+        if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!("SELECT value FROM \"{}\"", table);
-        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut values = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -242,29 +249,41 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn delete_table(&self, table: &str) -> Result<(), io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        conn.execute("BEGIN CONCURRENT", ())
+        self.conn
+            .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
-        if table_exists(&conn, table).await? {
+        if table_exists(&self.conn, table).await? {
             let sql = format!("DROP TABLE \"{}\"", table);
-            conn.execute(&sql, ()).await.map_err(io::Error::other)?;
+            self.conn
+                .execute(&sql, ())
+                .await
+                .map_err(io::Error::other)?;
         }
-        conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
+        self.conn
+            .execute("COMMIT", ())
+            .await
+            .map_err(io::Error::other)?;
         Ok(())
     }
 
     async fn clear(&self) -> Result<(), io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        conn.execute("BEGIN CONCURRENT", ())
+        self.conn
+            .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
         let tables = self.table_names().await?; // Reuse table_names; it's read-only
         for t in tables {
             let sql = format!("DROP TABLE \"{}\"", t);
-            conn.execute(&sql, ()).await.map_err(io::Error::other)?;
+            self.conn
+                .execute(&sql, ())
+                .await
+                .map_err(io::Error::other)?;
         }
-        conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
+        self.conn
+            .execute("COMMIT", ())
+            .await
+            .map_err(io::Error::other)?;
         Ok(())
     }
 }

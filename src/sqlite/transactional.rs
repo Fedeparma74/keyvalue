@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, sync::Arc};
 
 use async_trait::async_trait;
 use turso::Connection;
@@ -11,10 +11,10 @@ use crate::{
 use super::SqliteDB;
 
 pub struct ReadTransaction {
-    conn: Connection,
+    conn: Arc<Connection>,
 }
 pub struct WriteTransaction {
-    conn: Connection,
+    conn: Arc<Connection>,
 }
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
@@ -198,14 +198,17 @@ impl AsyncTransactionalKVDB for SqliteDB {
     type ReadTransaction = ReadTransaction;
     type WriteTransaction = WriteTransaction;
     async fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        Ok(ReadTransaction { conn })
+        Ok(ReadTransaction {
+            conn: self.conn.clone(),
+        })
     }
     async fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
-        let conn = self.inner.connect().map_err(io::Error::other)?;
-        conn.execute("BEGIN CONCURRENT", ())
+        self.conn
+            .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
-        Ok(WriteTransaction { conn })
+        Ok(WriteTransaction {
+            conn: self.conn.clone(),
+        })
     }
 }
