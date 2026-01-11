@@ -172,6 +172,123 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_db(&db);
+        common::persist_test_data(Box::new(db));
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::check_test_data(&db);
+        assert!(!keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+        keyvalue::KeyValueDB::clear(&db).unwrap();
+        assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(all(feature = "async", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::check_test_data_async(&db).await;
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_transactional_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_transactional_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_transactional_db(&db);
+        common::persist_test_data(Box::new(db));
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::check_test_data(&db);
+        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+        assert!(
+            !keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = keyvalue::TransactionalKVDB::begin_write(&db).unwrap();
+        keyvalue::KVWriteTransaction::clear(&mut write).unwrap();
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&write)
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::KVWriteTransaction::commit(write).unwrap();
+        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_transactional_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_transactional_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_transactional_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::check_test_data_async(&db).await;
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
+            .await
+            .unwrap();
+        keyvalue::AsyncKVWriteTransaction::clear(&mut write)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&write)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKVWriteTransaction::commit(write)
+            .await
+            .unwrap();
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
     #[tokio::test]
     async fn test_async_transactional_sqlite() {

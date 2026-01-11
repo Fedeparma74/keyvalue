@@ -33,6 +33,9 @@ pub mod in_memory;
 #[cfg(feature = "redb")]
 pub mod redb;
 
+#[cfg(feature = "fjall")]
+pub mod fjall;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
