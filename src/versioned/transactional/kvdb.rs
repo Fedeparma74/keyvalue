@@ -62,8 +62,12 @@ pub trait KVWriteVersionedTransaction: KVReadVersionedTransaction {
         value: &[u8],
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
-    fn remove(&mut self, table_name: &str, key: &str)
-    -> Result<Option<VersionedObject>, io::Error>;
+    fn remove(
+        &mut self,
+        table_name: &str,
+        key: &str,
+        version: u64,
+    ) -> Result<Option<VersionedObject>, io::Error>;
     fn commit(self) -> Result<(), io::Error>;
     fn abort(self) -> Result<(), io::Error>;
 
@@ -73,7 +77,7 @@ pub trait KVWriteVersionedTransaction: KVReadVersionedTransaction {
         &mut self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let current_object = KVReadVersionedTransaction::get(self, table_name, key)?;
         let new_version = match current_object {
@@ -83,12 +87,15 @@ pub trait KVWriteVersionedTransaction: KVReadVersionedTransaction {
             ))?,
             None => 1,
         };
-        KVWriteVersionedTransaction::insert(self, table_name, key, value, new_version)
+        match value {
+            Some(v) => self.insert(table_name, key, v, new_version),
+            None => self.remove(table_name, key, new_version),
+        }
     }
 
     fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
         for key in self.keys(table_name)? {
-            self.remove(table_name, &key)?;
+            self.update(table_name, &key, None)?;
         }
         Ok(())
     }
@@ -202,6 +209,7 @@ where
         &mut self,
         table_name: &str,
         key: &str,
+        version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let old_value = KVWriteTransaction::remove(self, table_name, key)?;
         if let Some(old_value) = old_value {
@@ -209,10 +217,7 @@ where
 
             let new_obj = VersionedObject {
                 value: None,
-                version: obj.version.checked_add(1).ok_or(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Version overflow",
-                ))?,
+                version,
             };
 
             KVWriteTransaction::insert(self, table_name, key, &encode(&new_obj))?;

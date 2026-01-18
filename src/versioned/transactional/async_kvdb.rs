@@ -74,6 +74,7 @@ pub trait AsyncKVWriteVersionedTransaction: AsyncKVReadVersionedTransaction {
         &mut self,
         table_name: &str,
         key: &str,
+        version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
     async fn commit(self) -> Result<(), io::Error>;
     async fn abort(self) -> Result<(), io::Error>;
@@ -84,7 +85,7 @@ pub trait AsyncKVWriteVersionedTransaction: AsyncKVReadVersionedTransaction {
         &mut self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let current_object = AsyncKVReadVersionedTransaction::get(self, table_name, key).await?;
         let new_version = match current_object {
@@ -94,12 +95,15 @@ pub trait AsyncKVWriteVersionedTransaction: AsyncKVReadVersionedTransaction {
             ))?,
             None => 1,
         };
-        AsyncKVWriteVersionedTransaction::insert(self, table_name, key, value, new_version).await
+        match value {
+            Some(v) => self.insert(table_name, key, v, new_version).await,
+            None => self.remove(table_name, key, new_version).await,
+        }
     }
 
     async fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
         for key in self.keys(table_name).await? {
-            self.remove(table_name, &key).await?;
+            self.update(table_name, &key, None).await?;
         }
         Ok(())
     }
@@ -219,6 +223,7 @@ where
         &mut self,
         table_name: &str,
         key: &str,
+        version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let old_value = AsyncKVWriteTransaction::remove(self, table_name, key).await?;
         if let Some(old_value) = old_value {
@@ -226,10 +231,7 @@ where
 
             let new_obj = VersionedObject {
                 value: None,
-                version: obj.version.checked_add(1).ok_or(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Version overflow",
-                ))?,
+                version,
             };
 
             AsyncKVWriteTransaction::insert(self, table_name, key, &encode(&new_obj)).await?;
