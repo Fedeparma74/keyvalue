@@ -31,7 +31,7 @@ reqwest = { version = "0.13", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redb = { version = "3", optional = true }
 fjall = { version = "3", optional = true }
-turso = { version = "0.4", optional = true }
+turso = { version = "0.4", default-features = false, optional = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros",
@@ -50,7 +50,7 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 wasmt = { git = "https://github.com/Fedeparma74/wasmt", optional = true }
 
 [features]
-default = ["std", "async"]
+default = ["std", "async", "test"]
 
 std = []
 
