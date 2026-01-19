@@ -1,8 +1,10 @@
-use std::io;
+use std::{
+    io,
+    sync::{RwLockReadGuard, RwLockWriteGuard},
+};
 
 use redb::{
-    ReadTransaction, ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError,
-    TableHandle, WriteTransaction,
+    ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError, TableHandle,
 };
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
@@ -12,9 +14,21 @@ use super::{
     transaction_error_to_io_error,
 };
 
-impl KVReadTransaction for ReadTransaction {
+pub struct ReadTransaction<'a> {
+    tx: redb::ReadTransaction,
+    _read_guard: RwLockReadGuard<'a, ()>,
+}
+
+pub struct WriteTransaction<'a> {
+    tx: redb::WriteTransaction,
+    _write_guard: RwLockWriteGuard<'a, ()>,
+}
+
+impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let table_res = self.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table_res = self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name));
         let table = match table_res {
             Ok(table) => table,
             Err(TableError::TableDoesNotExist(_)) => {
@@ -31,7 +45,9 @@ impl KVReadTransaction for ReadTransaction {
     }
 
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-        let table_res = self.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table_res = self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name));
         let table = match table_res {
             Ok(table) => table,
             Err(TableError::TableDoesNotExist(_)) => {
@@ -49,7 +65,7 @@ impl KVReadTransaction for ReadTransaction {
 
     fn table_names(&self) -> io::Result<Vec<String>> {
         let mut result = Vec::new();
-        let tables_res = self.list_tables();
+        let tables_res = self.tx.list_tables();
         match tables_res {
             Ok(tables) => {
                 for table_name in tables {
@@ -65,14 +81,16 @@ impl KVReadTransaction for ReadTransaction {
     }
 }
 
-impl KVReadTransaction for WriteTransaction {
+impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         // check if the table exists
         if !self.contains_table(table_name)? {
             return Ok(None);
         }
 
-        let table_res = self.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table_res = self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name));
         let table = match table_res {
             Ok(table) => table,
             Err(TableError::TableDoesNotExist(_)) => {
@@ -94,7 +112,9 @@ impl KVReadTransaction for WriteTransaction {
             return Ok(Vec::new());
         }
 
-        let table_res = self.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table_res = self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name));
         let table = match table_res {
             Ok(table) => table,
             Err(TableError::TableDoesNotExist(_)) => {
@@ -112,7 +132,7 @@ impl KVReadTransaction for WriteTransaction {
 
     fn table_names(&self) -> io::Result<Vec<String>> {
         let mut result = Vec::new();
-        let tables_res = self.list_tables();
+        let tables_res = self.tx.list_tables();
         match tables_res {
             Ok(tables) => {
                 for table_name in tables {
@@ -129,7 +149,7 @@ impl KVReadTransaction for WriteTransaction {
     }
 }
 
-impl KVWriteTransaction for WriteTransaction {
+impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
     fn insert(
         &mut self,
         table_name: &str,
@@ -137,6 +157,7 @@ impl KVWriteTransaction for WriteTransaction {
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
         let mut table = self
+            .tx
             .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
             .map_err(table_error_to_io_error)?;
         let old = table
@@ -151,7 +172,10 @@ impl KVWriteTransaction for WriteTransaction {
             return Ok(None);
         }
 
-        let old = match self.open_table(TableDefinition::<&str, &[u8]>::new(table_name)) {
+        let old = match self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
+        {
             Ok(mut table) => table
                 .remove(key)
                 .map_err(storage_error_to_io_error)?
@@ -164,34 +188,43 @@ impl KVWriteTransaction for WriteTransaction {
     }
 
     fn commit(self) -> Result<(), io::Error> {
-        redb::WriteTransaction::commit(self).map_err(commit_error_to_io_error)
+        redb::WriteTransaction::commit(self.tx).map_err(commit_error_to_io_error)
     }
 
     fn abort(self) -> Result<(), io::Error> {
-        redb::WriteTransaction::abort(self).map_err(storage_error_to_io_error)
+        redb::WriteTransaction::abort(self.tx).map_err(storage_error_to_io_error)
     }
 
     fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
-        redb::WriteTransaction::delete_table(self, TableDefinition::<&str, &[u8]>::new(table_name))
-            .map_err(table_error_to_io_error)?;
+        redb::WriteTransaction::delete_table(
+            &self.tx,
+            TableDefinition::<&str, &[u8]>::new(table_name),
+        )
+        .map_err(table_error_to_io_error)?;
 
         Ok(())
     }
 }
 
 impl TransactionalKVDB for RedbDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
+    type ReadTransaction<'a> = ReadTransaction<'a>;
+    type WriteTransaction<'a> = WriteTransaction<'a>;
 
-    fn begin_read(&self) -> io::Result<ReadTransaction> {
-        self.inner
+    fn begin_read(&self) -> io::Result<Self::ReadTransaction<'_>> {
+        let _read_guard = self.rw_lock.read().unwrap();
+        let tx = self
+            .inner
             .begin_read()
-            .map_err(transaction_error_to_io_error)
+            .map_err(transaction_error_to_io_error)?;
+        Ok(ReadTransaction { tx, _read_guard })
     }
 
-    fn begin_write(&self) -> io::Result<WriteTransaction> {
-        self.inner
+    fn begin_write(&self) -> io::Result<Self::WriteTransaction<'_>> {
+        let _write_guard = self.rw_lock.write().unwrap();
+        let tx = self
+            .inner
             .begin_write()
-            .map_err(transaction_error_to_io_error)
+            .map_err(transaction_error_to_io_error)?;
+        Ok(WriteTransaction { tx, _write_guard })
     }
 }

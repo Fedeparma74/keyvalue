@@ -1,7 +1,10 @@
 use std::{io, path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use turso::{Builder, Connection, params};
+use turso::{
+    Builder, Connection, params,
+    transaction::{Transaction, TransactionBehavior},
+};
 
 use crate::AsyncKeyValueDB;
 #[cfg(feature = "transactional")]
@@ -10,23 +13,23 @@ mod transactional;
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 #[derive(Debug)]
 pub struct SqliteDB {
-    conn: Arc<Connection>,
+    conn: Connection,
 }
 
-async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error> {
+async fn table_exists(tx: &Transaction<'_>, table: &str) -> Result<bool, io::Error> {
     let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
-    let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
+    let mut stmt = tx.prepare(sql).await.map_err(io::Error::other)?;
     let mut rows = stmt.query([table]).await.map_err(io::Error::other)?;
     Ok(rows.next().await.map_err(io::Error::other)?.is_some())
 }
 
-async fn ensure_table(conn: &Connection, table: &str) -> Result<(), io::Error> {
-    if !table_exists(conn, table).await? {
+async fn ensure_table(tx: &Transaction<'_>, table: &str) -> Result<(), io::Error> {
+    if !table_exists(tx, table).await? {
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS \"{}\" (key TEXT PRIMARY KEY, value BLOB)",
             table
         );
-        conn.execute(&sql, ()).await.map_err(io::Error::other)?;
+        tx.execute(&sql, ()).await.map_err(io::Error::other)?;
     }
     Ok(())
 }
@@ -72,9 +75,7 @@ impl SqliteDB {
             }
         }
 
-        Ok(Self {
-            conn: Arc::new(conn),
-        })
+        Ok(Self { conn })
     }
 }
 
@@ -87,24 +88,21 @@ impl AsyncKeyValueDB for SqliteDB {
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        self.conn
-            .execute("BEGIN CONCURRENT", ())
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(io::Error::other)?;
-        ensure_table(&self.conn, table).await?;
+        ensure_table(&tx, table).await?;
         let old = self.get(table, key).await?; // Reuse get for old value; it's read-only and safe
         let sql = format!(
             "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
             table
         );
-        self.conn
-            .execute(&sql, params![key, value])
+        tx.execute(&sql, params![key, value])
             .await
             .map_err(io::Error::other)?;
-        self.conn
-            .execute("COMMIT", ())
-            .await
-            .map_err(io::Error::other)?;
+        tx.commit().await.map_err(io::Error::other)?;
         Ok(old)
     }
 

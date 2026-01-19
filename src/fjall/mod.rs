@@ -20,6 +20,7 @@ const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 pub struct FjallDB {
     inner: OptimisticTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
+    rw_lock: Arc<RwLock<()>>,
 }
 
 impl FjallDB {
@@ -49,6 +50,7 @@ impl FjallDB {
         Ok(Self {
             inner,
             deleted_tables: deleted,
+            rw_lock: Arc::new(RwLock::new(())),
         })
     }
 
@@ -102,6 +104,8 @@ impl FjallDB {
 
 impl KeyValueDB for FjallDB {
     fn insert(&self, table: &str, key: &str, value: &[u8]) -> Result<Option<Vec<u8>>, io::Error> {
+        let _write_guard = self.rw_lock.write().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -149,6 +153,8 @@ impl KeyValueDB for FjallDB {
         Ok(old)
     }
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let _read_guard = self.rw_lock.read().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Ok(None);
         }
@@ -176,6 +182,8 @@ impl KeyValueDB for FjallDB {
     }
 
     fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let _write_guard = self.rw_lock.write().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Ok(None);
         }
@@ -206,6 +214,8 @@ impl KeyValueDB for FjallDB {
     }
 
     fn iter(&self, table: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let _read_guard = self.rw_lock.read().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Ok(Vec::new());
         }
@@ -237,6 +247,8 @@ impl KeyValueDB for FjallDB {
     }
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        let _read_guard = self.rw_lock.read().unwrap();
+
         // Exclude internal meta and deleted tables
         let deleted_tables = self.deleted_tables.read().unwrap();
         let names = self
@@ -260,6 +272,8 @@ impl KeyValueDB for FjallDB {
         table: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let _read_guard = self.rw_lock.read().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Ok(Vec::new());
         }
@@ -291,6 +305,8 @@ impl KeyValueDB for FjallDB {
     }
 
     fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
+        let _read_guard = self.rw_lock.read().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Ok(false);
         }
@@ -303,6 +319,8 @@ impl KeyValueDB for FjallDB {
     }
 
     fn delete_table(&self, table: &str) -> Result<(), io::Error> {
+        let _write_guard = self.rw_lock.write().unwrap();
+
         if table == META_DELETED_KEYSPACE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -328,9 +346,44 @@ impl KeyValueDB for FjallDB {
     }
 
     fn clear(&self) -> Result<(), io::Error> {
-        let current_tables = self.table_names()?;
-        for table in current_tables {
-            self.delete_table(&table)?;
+        let _write_guard = self.rw_lock.write().unwrap();
+
+        // Exclude internal meta and deleted tables
+        let deleted_tables = self.deleted_tables.read().unwrap();
+        let current_tables = self
+            .inner
+            .list_keyspace_names()
+            .iter()
+            .filter_map(|n| {
+                if n.as_ref() != META_DELETED_KEYSPACE && !deleted_tables.contains(n.as_ref()) {
+                    Some(n.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<String>>();
+
+        for table_name in current_tables {
+            if table_name == META_DELETED_KEYSPACE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot delete meta deleted keyspace",
+                ));
+            }
+
+            // Skip if already deleted
+            {
+                let deleted_tables = self.deleted_tables.read().unwrap();
+                if deleted_tables.contains(&table_name) {
+                    return Ok(());
+                }
+            }
+
+            // 1. Clear all data in the keyspace
+            self.clear_keyspace(&table_name)?;
+
+            // 2. Mark as deleted (add key with empty value to meta)
+            self.mark_deleted(&table_name)?;
         }
         Ok(())
     }

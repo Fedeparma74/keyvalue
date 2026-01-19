@@ -888,6 +888,7 @@ pub async fn test_async_transactional_db<D: keyvalue::AsyncTransactionalKVDB>(db
 
     assert!(write.insert(table1, key1, value1).await.unwrap().is_none());
     assert!(write.insert(table1, key2, value2).await.unwrap().is_none());
+    assert!(write.insert(table1, key1, value1).await.unwrap().is_some());
 
     write.commit().await.unwrap();
 

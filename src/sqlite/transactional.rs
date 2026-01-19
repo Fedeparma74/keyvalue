@@ -1,7 +1,10 @@
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{RwLockReadGuard, RwLockWriteGuard},
+};
 
 use async_trait::async_trait;
-use turso::Connection;
+use turso::transaction::Transaction;
 
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
@@ -10,22 +13,24 @@ use crate::{
 
 use super::SqliteDB;
 
-pub struct ReadTransaction {
-    conn: Arc<Connection>,
+pub struct ReadTransaction<'a> {
+    tx: Transaction<'a>,
+    _read_guard: RwLockReadGuard<'a, ()>,
 }
-pub struct WriteTransaction {
-    conn: Arc<Connection>,
+pub struct WriteTransaction<'a> {
+    tx: Transaction<'a>,
+    _write_guard: RwLockWriteGuard<'a, ()>,
 }
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for ReadTransaction {
+
+#[async_trait(?Send)]
+impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction<'a> {
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if !table_exists(&self.conn, table).await? {
             return Ok(None);
         }
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
         let mut stmt = self
-            .conn
+            .tx
             .prepare(sql.as_str())
             .await
             .map_err(io::Error::other)?;
