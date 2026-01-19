@@ -14,6 +14,7 @@ mod transactional;
 
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
+
 const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
 #[derive(Clone)]
