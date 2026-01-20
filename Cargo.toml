@@ -50,7 +50,7 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 wasmt = { git = "https://github.com/Fedeparma74/wasmt", optional = true }
 
 [features]
-default = ["std", "async", "test"]
+default = ["std", "async"]
 
 std = []
 
