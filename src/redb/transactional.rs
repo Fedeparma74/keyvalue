@@ -1,7 +1,4 @@
-use std::{
-    io,
-    sync::{RwLockReadGuard, RwLockWriteGuard},
-};
+use std::io;
 
 use redb::{
     ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError, TableHandle,
@@ -14,17 +11,15 @@ use super::{
     transaction_error_to_io_error,
 };
 
-pub struct ReadTransaction<'a> {
+pub struct ReadTransaction {
     tx: redb::ReadTransaction,
-    _read_guard: RwLockReadGuard<'a, ()>,
 }
 
-pub struct WriteTransaction<'a> {
+pub struct WriteTransaction {
     tx: redb::WriteTransaction,
-    _write_guard: RwLockWriteGuard<'a, ()>,
 }
 
-impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
+impl KVReadTransaction for ReadTransaction {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let table_res = self
             .tx
@@ -81,7 +76,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
     }
 }
 
-impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
+impl KVReadTransaction for WriteTransaction {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         // check if the table exists
         if !self.contains_table(table_name)? {
@@ -149,7 +144,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
     }
 }
 
-impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
+impl KVWriteTransaction for WriteTransaction {
     fn insert(
         &mut self,
         table_name: &str,
@@ -207,24 +202,22 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
 }
 
 impl TransactionalKVDB for RedbDB {
-    type ReadTransaction<'a> = ReadTransaction<'a>;
-    type WriteTransaction<'a> = WriteTransaction<'a>;
+    type ReadTransaction = ReadTransaction;
+    type WriteTransaction = WriteTransaction;
 
-    fn begin_read(&self) -> io::Result<Self::ReadTransaction<'_>> {
-        let _read_guard = self.rw_lock.read().unwrap();
+    fn begin_read(&self) -> io::Result<Self::ReadTransaction> {
         let tx = self
             .inner
             .begin_read()
             .map_err(transaction_error_to_io_error)?;
-        Ok(ReadTransaction { tx, _read_guard })
+        Ok(ReadTransaction { tx })
     }
 
-    fn begin_write(&self) -> io::Result<Self::WriteTransaction<'_>> {
-        let _write_guard = self.rw_lock.write().unwrap();
+    fn begin_write(&self) -> io::Result<Self::WriteTransaction> {
         let tx = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
-        Ok(WriteTransaction { tx, _write_guard })
+        Ok(WriteTransaction { tx })
     }
 }

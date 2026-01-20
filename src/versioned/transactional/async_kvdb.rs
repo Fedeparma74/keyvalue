@@ -10,15 +10,16 @@ use async_trait::async_trait;
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncVersionedTransactionalKVDB: MaybeSendSync + 'static {
-    type ReadTransaction<'a>: AsyncKVReadVersionedTransaction<'a>;
-    type WriteTransaction<'a>: AsyncKVWriteVersionedTransaction<'a>;
+    type ReadTransaction: AsyncKVReadVersionedTransaction;
+    type WriteTransaction: AsyncKVWriteVersionedTransaction;
 
-    async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error>;
-    async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
+    async fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error>;
+    async fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
 }
 
-#[async_trait(?Send)]
-pub trait AsyncKVReadVersionedTransaction<'a> {
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+pub trait AsyncKVReadVersionedTransaction: MaybeSendSync {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
     async fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -59,8 +60,9 @@ pub trait AsyncKVReadVersionedTransaction<'a> {
     }
 }
 
-#[async_trait(?Send)]
-pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<'a> {
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+pub trait AsyncKVWriteVersionedTransaction: AsyncKVReadVersionedTransaction {
     async fn insert(
         &mut self,
         table_name: &str,
@@ -116,21 +118,22 @@ pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<T: AsyncTransactionalKVDB> AsyncVersionedTransactionalKVDB for T {
-    type ReadTransaction<'a> = T::ReadTransaction<'a>;
-    type WriteTransaction<'a> = T::WriteTransaction<'a>;
-    async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+    type ReadTransaction = T::ReadTransaction;
+    type WriteTransaction = T::WriteTransaction;
+    async fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
         AsyncTransactionalKVDB::begin_read(self).await
     }
 
-    async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+    async fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
         AsyncTransactionalKVDB::begin_write(self).await
     }
 }
 
-#[async_trait(?Send)]
-impl<'a, T> AsyncKVReadVersionedTransaction<'a> for T
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+impl<T> AsyncKVReadVersionedTransaction for T
 where
-    T: AsyncKVReadTransaction<'a>,
+    T: AsyncKVReadTransaction,
 {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let value = AsyncKVReadTransaction::get(self, table_name, key).await?;
@@ -188,10 +191,11 @@ where
     }
 }
 
-#[async_trait(?Send)]
-impl<'a, T> AsyncKVWriteVersionedTransaction<'a> for T
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+impl<T> AsyncKVWriteVersionedTransaction for T
 where
-    T: AsyncKVWriteTransaction<'a>,
+    T: AsyncKVWriteTransaction,
 {
     async fn insert(
         &mut self,
