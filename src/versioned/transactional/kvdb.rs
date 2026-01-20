@@ -6,14 +6,14 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 
 pub trait VersionedTransactionalKVDB: MaybeSendSync + 'static {
-    type ReadTransaction<'a>: KVReadVersionedTransaction<'a>;
-    type WriteTransaction<'a>: KVWriteVersionedTransaction<'a>;
+    type ReadTransaction: KVReadVersionedTransaction;
+    type WriteTransaction: KVWriteVersionedTransaction;
 
-    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error>;
-    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
+    fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error>;
+    fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
 }
 
-pub trait KVReadVersionedTransaction<'a> {
+pub trait KVReadVersionedTransaction {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -54,7 +54,7 @@ pub trait KVReadVersionedTransaction<'a> {
     }
 }
 
-pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
+pub trait KVWriteVersionedTransaction: KVReadVersionedTransaction {
     fn insert(
         &mut self,
         table_name: &str,
@@ -111,21 +111,21 @@ impl<T> VersionedTransactionalKVDB for T
 where
     T: TransactionalKVDB,
 {
-    type ReadTransaction<'a> = T::ReadTransaction<'a>;
-    type WriteTransaction<'a> = T::WriteTransaction<'a>;
+    type ReadTransaction = T::ReadTransaction;
+    type WriteTransaction = T::WriteTransaction;
 
-    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+    fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
         TransactionalKVDB::begin_read(self)
     }
 
-    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+    fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
         TransactionalKVDB::begin_write(self)
     }
 }
 
-impl<'a, T> KVReadVersionedTransaction<'a> for T
+impl<T> KVReadVersionedTransaction for T
 where
-    T: KVReadTransaction<'a>,
+    T: KVReadTransaction,
 {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
         let value = KVReadTransaction::get(self, table_name, key)?;
@@ -181,9 +181,9 @@ where
     }
 }
 
-impl<'a, T> KVWriteVersionedTransaction<'a> for T
+impl<T> KVWriteVersionedTransaction for T
 where
-    T: KVWriteTransaction<'a>,
+    T: KVWriteTransaction,
 {
     fn insert(
         &mut self,

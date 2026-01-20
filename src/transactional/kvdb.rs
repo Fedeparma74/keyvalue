@@ -3,14 +3,14 @@ use crate::{MaybeSendSync, io};
 use alloc::{string::String, vec::Vec};
 
 pub trait TransactionalKVDB: MaybeSendSync + 'static {
-    type ReadTransaction<'a>: KVReadTransaction<'a>;
-    type WriteTransaction<'a>: KVWriteTransaction<'a>;
+    type ReadTransaction: KVReadTransaction;
+    type WriteTransaction: KVWriteTransaction;
 
-    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error>;
-    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
+    fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error>;
+    fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
 }
 
-pub trait KVReadTransaction<'a> {
+pub trait KVReadTransaction: MaybeSendSync {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
     fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -51,7 +51,7 @@ pub trait KVReadTransaction<'a> {
     }
 }
 
-pub trait KVWriteTransaction<'a>: KVReadTransaction<'a> {
+pub trait KVWriteTransaction: KVReadTransaction {
     fn insert(
         &mut self,
         table_name: &str,

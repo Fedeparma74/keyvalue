@@ -1,34 +1,32 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock};
 
 use fjall::{
-    KeyspaceCreateOptions, Readable, SingleWriterTxDatabase, SingleWriterTxKeyspace,
-    SingleWriterWriteTx, Snapshot,
+    KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace, OptimisticWriteTx, Readable,
+    Snapshot,
 };
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
 use super::{FjallDB, META_DELETED_KEYSPACE};
 
-pub struct ReadTransaction<'a> {
+pub struct ReadTransaction {
     snapshot: Snapshot,
-    db: SingleWriterTxDatabase,
+    db: OptimisticTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
-    _read_guard: RwLockReadGuard<'a, ()>,
 }
 
-pub struct WriteTransaction<'a> {
-    db: SingleWriterTxDatabase,
-    tx: SingleWriterWriteTx<'a>,
+pub struct WriteTransaction {
+    db: OptimisticTxDatabase,
+    tx: OptimisticWriteTx,
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>, // For RYOW
     tx_deleted_tables: HashSet<String>,                         // Local to this transaction
     global_deleted_tables: Arc<RwLock<HashSet<String>>>,        // Shared global state
-    meta_deleted_keyspace: SingleWriterTxKeyspace,
-    _write_guard: RwLockWriteGuard<'a, ()>,
+    meta_deleted_keyspace: OptimisticTxKeyspace,
 }
 
-impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
+impl KVReadTransaction for ReadTransaction {
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == META_DELETED_KEYSPACE {
             return Ok(None);
@@ -138,7 +136,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
     }
 }
 
-impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
+impl KVReadTransaction for WriteTransaction {
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == META_DELETED_KEYSPACE {
             return Ok(None);
@@ -252,7 +250,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
     }
 }
 
-impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
+impl KVWriteTransaction for WriteTransaction {
     fn insert(
         &mut self,
         table: &str,
@@ -377,7 +375,10 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
             self.global_deleted_tables.write().unwrap().insert(table);
         }
 
-        self.tx.commit().map_err(io::Error::other)?;
+        self.tx
+            .commit()
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
 
         Ok(())
     }
@@ -389,19 +390,18 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
 }
 
 impl TransactionalKVDB for FjallDB {
-    type ReadTransaction<'a> = ReadTransaction<'a>;
-    type WriteTransaction<'a> = WriteTransaction<'a>;
+    type ReadTransaction = ReadTransaction;
+    type WriteTransaction = WriteTransaction;
 
-    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+    fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
         Ok(ReadTransaction {
             snapshot: self.inner.read_tx(),
             db: self.inner.clone(),
             deleted_tables: self.deleted_tables.clone(),
-            _read_guard: self.rw_lock.read().unwrap(),
         })
     }
 
-    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+    fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
         let meta_deleted_keyspace = self
             .inner
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
@@ -409,12 +409,11 @@ impl TransactionalKVDB for FjallDB {
 
         Ok(WriteTransaction {
             db: self.inner.clone(),
-            tx: self.inner.write_tx(),
+            tx: self.inner.write_tx().map_err(io::Error::other)?,
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
             global_deleted_tables: self.deleted_tables.clone(),
             meta_deleted_keyspace,
-            _write_guard: self.rw_lock.write().unwrap(),
         })
     }
 }

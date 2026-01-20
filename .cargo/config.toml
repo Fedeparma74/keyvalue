@@ -9,6 +9,5 @@ rustflags = [
     'getrandom_backend="wasm_js"',
 ]
 
-
 [unstable]
 build-std = ['std', 'panic_abort']

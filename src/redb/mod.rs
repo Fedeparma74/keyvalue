@@ -1,4 +1,4 @@
-use std::{io, path::Path, sync::RwLock};
+use std::{io, path::Path};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
 #[cfg(feature = "transactional")]
@@ -13,24 +13,18 @@ mod transactional;
 #[derive(Debug)]
 pub struct RedbDB {
     inner: Database,
-    rw_lock: RwLock<()>,
 }
 
 impl RedbDB {
     pub fn open(path: &Path) -> io::Result<Self> {
         let inner = Database::create(path).map_err(database_error_to_io_error)?;
 
-        Ok(Self {
-            inner,
-            rw_lock: RwLock::new(()),
-        })
+        Ok(Self { inner })
     }
 }
 
 impl KeyValueDB for RedbDB {
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let _write_guard = self.rw_lock.write().unwrap();
-
         let write_transaction = self
             .inner
             .begin_write()
@@ -53,8 +47,6 @@ impl KeyValueDB for RedbDB {
     }
 
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let _read_guard = self.rw_lock.read().unwrap();
-
         let read_transaction = self
             .inner
             .begin_read()
@@ -80,8 +72,6 @@ impl KeyValueDB for RedbDB {
     }
 
     fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let _write_guard = self.rw_lock.write().unwrap();
-
         let write_transaction = self
             .inner
             .begin_write()
@@ -119,8 +109,6 @@ impl KeyValueDB for RedbDB {
     }
 
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-        let _read_guard = self.rw_lock.read().unwrap();
-
         let read_transaction = self
             .inner
             .begin_read()
@@ -143,8 +131,6 @@ impl KeyValueDB for RedbDB {
     }
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        let _read_guard = self.rw_lock.read().unwrap();
-
         let read_transaction = self
             .inner
             .begin_read()
@@ -166,8 +152,6 @@ impl KeyValueDB for RedbDB {
     }
 
     fn delete_table(&self, table_name: &str) -> io::Result<()> {
-        let _write_guard = self.rw_lock.write().unwrap();
-
         let write_transaction = self
             .inner
             .begin_write()
@@ -183,8 +167,6 @@ impl KeyValueDB for RedbDB {
     }
 
     fn clear(&self) -> Result<(), io::Error> {
-        let _write_guard = self.rw_lock.write().unwrap();
-
         let write_transaction = self
             .inner
             .begin_write()
