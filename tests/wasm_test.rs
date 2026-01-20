@@ -129,15 +129,17 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
         common::check_test_data_async(&db).await;
-        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
-            .await
-            .unwrap();
-        assert!(
-            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+        {
+            let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
                 .await
-                .unwrap()
-                .is_empty()
-        );
+                .unwrap();
+            assert!(
+                !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
             .await
             .unwrap();

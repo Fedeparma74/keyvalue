@@ -16,7 +16,7 @@ use futures::{
 };
 use indexed_db::{Database, Factory, ObjectStore, Transaction, VersionChangeEvent};
 use js_sys::{Uint8Array, wasm_bindgen::JsValue};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
@@ -37,12 +37,13 @@ enum TableUpdate {
     Deleted(String), // table name
 }
 
-pub struct ReadTransaction {
+pub struct ReadTransaction<'a> {
     command_request_sender:
         UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
+    _read_guard: RwLockReadGuard<'a, ()>,
 }
 
-pub struct WriteTransaction {
+pub struct WriteTransaction<'a> {
     name: String,
     version: Arc<AtomicU32>,
     command_request_sender:
@@ -51,11 +52,11 @@ pub struct WriteTransaction {
         String, // table name
         Arc<WriteOperation>,
     )>,
+    _write_guard: RwLockWriteGuard<'a, ()>,
 }
 
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for ReadTransaction {
+#[async_trait(?Send)]
+impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction<'a> {
     async fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let table_name = table_name.to_string();
         let key = key.to_string();
@@ -196,9 +197,8 @@ impl AsyncKVReadTransaction for ReadTransaction {
     }
 }
 
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for WriteTransaction {
+#[async_trait(?Send)]
+impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction<'a> {
     async fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let table_name = table_name.to_string();
         let key = key.to_string();
@@ -534,9 +534,8 @@ impl AsyncKVReadTransaction for WriteTransaction {
     }
 }
 
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVWriteTransaction for WriteTransaction {
+#[async_trait(?Send)]
+impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction<'a> {
     async fn insert(
         &mut self,
         table_name: &str,
@@ -769,21 +768,23 @@ impl AsyncKVWriteTransaction for WriteTransaction {
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncTransactionalKVDB for IndexedDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
+    type ReadTransaction<'a> = ReadTransaction<'a>;
+    type WriteTransaction<'a> = WriteTransaction<'a>;
 
-    async fn begin_read(&self) -> io::Result<ReadTransaction> {
+    async fn begin_read(&self) -> io::Result<ReadTransaction<'_>> {
         Ok(ReadTransaction {
             command_request_sender: self.command_request_sender.clone(),
+            _read_guard: self.rw_lock.read().await,
         })
     }
 
-    async fn begin_write(&self) -> io::Result<WriteTransaction> {
+    async fn begin_write(&self) -> io::Result<WriteTransaction<'_>> {
         Ok(WriteTransaction {
             name: self.name.clone(),
             version: self.version.clone(),
             command_request_sender: self.command_request_sender.clone(),
             operations: Vec::new(),
+            _write_guard: self.rw_lock.write().await,
         })
     }
 }

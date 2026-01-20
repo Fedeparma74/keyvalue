@@ -1,10 +1,8 @@
-use std::{
-    io,
-    sync::{RwLockReadGuard, RwLockWriteGuard},
-};
+use std::{io, sync::Arc};
 
 use async_trait::async_trait;
-use turso::transaction::Transaction;
+use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
+use turso::Connection;
 
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
@@ -14,14 +12,13 @@ use crate::{
 use super::SqliteDB;
 
 pub struct ReadTransaction<'a> {
-    tx: Transaction<'a>,
+    conn: Arc<Connection>,
     _read_guard: RwLockReadGuard<'a, ()>,
 }
 pub struct WriteTransaction<'a> {
-    tx: Transaction<'a>,
+    conn: Arc<Connection>,
     _write_guard: RwLockWriteGuard<'a, ()>,
 }
-
 #[async_trait(?Send)]
 impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction<'a> {
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
@@ -30,7 +27,7 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction<'a> {
         }
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
         let mut stmt = self
-            .tx
+            .conn
             .prepare(sql.as_str())
             .await
             .map_err(io::Error::other)?;
@@ -76,9 +73,9 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction<'a> {
         Ok(out)
     }
 }
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for WriteTransaction {
+
+#[async_trait(?Send)]
+impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction<'a> {
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if !table_exists(&self.conn, table).await? {
             return Ok(None);
@@ -131,9 +128,9 @@ impl AsyncKVReadTransaction for WriteTransaction {
         Ok(out)
     }
 }
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVWriteTransaction for WriteTransaction {
+
+#[async_trait(?Send)]
+impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction<'a> {
     async fn insert(
         &mut self,
         table: &str,
@@ -197,23 +194,26 @@ impl AsyncKVWriteTransaction for WriteTransaction {
         Ok(())
     }
 }
+
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncTransactionalKVDB for SqliteDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
-    async fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
+    type ReadTransaction<'a> = ReadTransaction<'a>;
+    type WriteTransaction<'a> = WriteTransaction<'a>;
+    async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
         Ok(ReadTransaction {
             conn: self.conn.clone(),
+            _read_guard: self.rw_lock.read().await,
         })
     }
-    async fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
+    async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
         self.conn
             .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
         Ok(WriteTransaction {
             conn: self.conn.clone(),
+            _write_guard: self.rw_lock.write().await,
         })
     }
 }

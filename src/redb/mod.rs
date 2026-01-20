@@ -1,8 +1,4 @@
-use std::{
-    io,
-    path::Path,
-    sync::{Arc, RwLock},
-};
+use std::{io, path::Path, sync::RwLock};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
 #[cfg(feature = "transactional")]
@@ -17,7 +13,7 @@ mod transactional;
 #[derive(Debug)]
 pub struct RedbDB {
     inner: Database,
-    rw_lock: Arc<RwLock<()>>,
+    rw_lock: RwLock<()>,
 }
 
 impl RedbDB {
@@ -26,7 +22,7 @@ impl RedbDB {
 
         Ok(Self {
             inner,
-            rw_lock: Arc::new(RwLock::new(())),
+            rw_lock: RwLock::new(()),
         })
     }
 }

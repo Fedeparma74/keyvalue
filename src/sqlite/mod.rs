@@ -1,35 +1,35 @@
 use std::{io, path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use turso::{
-    Builder, Connection, params,
-    transaction::{Transaction, TransactionBehavior},
-};
+use tokio::sync::RwLock;
+use turso::{Builder, Connection, params};
 
 use crate::AsyncKeyValueDB;
 #[cfg(feature = "transactional")]
 mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
+
 #[derive(Debug)]
 pub struct SqliteDB {
-    conn: Connection,
+    conn: Arc<Connection>,
+    rw_lock: RwLock<()>,
 }
 
-async fn table_exists(tx: &Transaction<'_>, table: &str) -> Result<bool, io::Error> {
+async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error> {
     let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
-    let mut stmt = tx.prepare(sql).await.map_err(io::Error::other)?;
+    let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
     let mut rows = stmt.query([table]).await.map_err(io::Error::other)?;
     Ok(rows.next().await.map_err(io::Error::other)?.is_some())
 }
 
-async fn ensure_table(tx: &Transaction<'_>, table: &str) -> Result<(), io::Error> {
-    if !table_exists(tx, table).await? {
+async fn ensure_table(conn: &Connection, table: &str) -> Result<(), io::Error> {
+    if !table_exists(conn, table).await? {
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS \"{}\" (key TEXT PRIMARY KEY, value BLOB)",
             table
         );
-        tx.execute(&sql, ()).await.map_err(io::Error::other)?;
+        conn.execute(&sql, ()).await.map_err(io::Error::other)?;
     }
     Ok(())
 }
@@ -75,7 +75,10 @@ impl SqliteDB {
             }
         }
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Arc::new(conn),
+            rw_lock: RwLock::new(()),
+        })
     }
 }
 
@@ -88,25 +91,32 @@ impl AsyncKeyValueDB for SqliteDB {
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        let _write_guard = self.rw_lock.write().await;
+
+        self.conn
+            .execute("BEGIN CONCURRENT", ())
             .await
             .map_err(io::Error::other)?;
-        ensure_table(&tx, table).await?;
+        ensure_table(&self.conn, table).await?;
         let old = self.get(table, key).await?; // Reuse get for old value; it's read-only and safe
         let sql = format!(
             "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
             table
         );
-        tx.execute(&sql, params![key, value])
+        self.conn
+            .execute(&sql, params![key, value])
             .await
             .map_err(io::Error::other)?;
-        tx.commit().await.map_err(io::Error::other)?;
+        self.conn
+            .execute("COMMIT", ())
+            .await
+            .map_err(io::Error::other)?;
         Ok(old)
     }
 
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         if !table_exists(&self.conn, table).await? {
             return Ok(None);
         }
@@ -122,6 +132,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let _write_guard = self.rw_lock.write().await;
+
         self.conn
             .execute("BEGIN CONCURRENT", ())
             .await
@@ -147,6 +159,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn iter(&self, table: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
@@ -163,6 +177,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         let sql = "SELECT name FROM sqlite_master WHERE type='table'";
         let mut stmt = self.conn.prepare(sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
@@ -179,6 +195,8 @@ impl AsyncKeyValueDB for SqliteDB {
         table: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
@@ -198,10 +216,14 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         table_exists(&self.conn, table).await
     }
 
     async fn contains_key(&self, table: &str, key: &str) -> Result<bool, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         if !table_exists(&self.conn, table).await? {
             return Ok(false);
         }
@@ -217,6 +239,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn keys(&self, table: &str) -> Result<Vec<String>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
@@ -232,6 +256,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn values(&self, table: &str) -> Result<Vec<Vec<u8>>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         if !table_exists(&self.conn, table).await? {
             return Ok(Vec::new());
         }
@@ -247,6 +273,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn delete_table(&self, table: &str) -> Result<(), io::Error> {
+        let _write_guard = self.rw_lock.write().await;
+
         self.conn
             .execute("BEGIN CONCURRENT", ())
             .await
@@ -266,6 +294,8 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn clear(&self) -> Result<(), io::Error> {
+        let _write_guard = self.rw_lock.write().await;
+
         self.conn
             .execute("BEGIN CONCURRENT", ())
             .await
