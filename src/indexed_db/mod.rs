@@ -51,6 +51,7 @@ pub struct IndexedDB {
     task_handle: wasmt::task::r#async::JoinHandle<()>,
     command_request_sender:
         UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
+    rw_lock: RwLock<()>,
 }
 
 impl Drop for IndexedDB {
@@ -140,7 +141,62 @@ impl IndexedDB {
             idb_dropper: Some(idb_dropper),
             task_handle,
             command_request_sender: command_sender,
+            rw_lock: RwLock::new(()),
         })
+    }
+
+    async fn _get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        let get_closure = move |db: Rc<RwLock<Database>>| {
+            async move {
+                let db = db.read().await;
+                let table_name = table_name.to_string();
+                let key = key.to_string();
+                let value = match db
+                    .transaction(&[&table_name])
+                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let value = table.get(&JsValue::from(key)).await?;
+                        Ok(value)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Get(None));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::Get(
+                    value.map(|v| Uint8Array::from(v).to_vec()),
+                ))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(get_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Get(value) = response {
+            return Ok(value);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
     }
 }
 
@@ -152,7 +208,9 @@ impl AsyncKeyValueDB for IndexedDB {
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        let old_value = self.get(table_name, key).await?;
+        let _write_guard = self.rw_lock.write().await;
+
+        let old_value = self._get(table_name, key).await?;
 
         let name = self.name.clone();
         let version = self.version.clone();
@@ -226,61 +284,15 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        let table_name = table_name.to_string();
-        let key = key.to_string();
-        let get_closure = move |db: Rc<RwLock<Database>>| {
-            async move {
-                let db = db.read().await;
-                let table_name = table_name.to_string();
-                let key = key.to_string();
-                let value = match db
-                    .transaction(&[&table_name])
-                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                        let table = tx.object_store(&table_name)?;
-                        let value = table.get(&JsValue::from(key)).await?;
-                        Ok(value)
-                    })
-                    .await
-                    .map_err(indexed_db_error_to_io_error)
-                {
-                    Ok(value) => value,
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::NotFound {
-                            return Ok(CommandResponse::Get(None));
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                };
+        let _read_guard = self.rw_lock.read().await;
 
-                Ok::<_, std::io::Error>(CommandResponse::Get(
-                    value.map(|v| Uint8Array::from(v).to_vec()),
-                ))
-            }
-            .boxed_local()
-        };
-
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.command_request_sender
-            .unbounded_send((Box::new(get_closure), response_sender))
-            .map_err(|_| io::Error::other("Failed to send command request"))?;
-
-        let response = response_receiver
-            .await
-            .map_err(|_| io::Error::other("Failed to receive command response"))?;
-
-        if let CommandResponse::Get(value) = response {
-            return Ok(value);
-        }
-        if let CommandResponse::Error(e) = response {
-            return Err(e);
-        }
-
-        Err(io::Error::other("Unexpected response type"))
+        self._get(table_name, key).await
     }
 
     async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        if let Some(old_value) = self.get(table_name, key).await? {
+        let _write_guard = self.rw_lock.write().await;
+
+        if let Some(old_value) = self._get(table_name, key).await? {
             let name = self.name.clone();
             let version = self.version.clone();
             let table_name = table_name.to_string();
@@ -359,6 +371,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         let table_name = table_name.to_string();
         let iter_closure = move |db: Rc<RwLock<Database>>| {
             async move {
@@ -416,6 +430,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         let table_names_closure = |db: Rc<RwLock<Database>>| {
             async move {
                 let db = db.read().await;
@@ -444,6 +460,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+        let _write_guard = self.rw_lock.write().await;
+
         let name = self.name.clone();
         let version = self.version.clone();
         let table_name = table_name.to_string();
@@ -496,6 +514,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         let table_name = table_name.to_string();
         let key = key.to_string();
         let contains_key_closure = move |db: Rc<RwLock<Database>>| {
@@ -548,6 +568,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         let table_name = table_name.to_string();
         let keys_closure = move |db: Rc<RwLock<Database>>| {
             async move {
@@ -602,6 +624,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
+        let _read_guard = self.rw_lock.read().await;
+
         let table_name = table_name.to_string();
         let values_closure = move |db: Rc<RwLock<Database>>| {
             async move {
@@ -656,6 +680,8 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn clear(&self) -> io::Result<()> {
+        let _write_guard = self.rw_lock.write().await;
+
         let name = self.name.clone();
         let version = self.version.clone();
         let clear_closure = move |db: Rc<RwLock<Database>>| {
