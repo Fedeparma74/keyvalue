@@ -173,8 +173,8 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
             .keyspace(table, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
 
-        let snapshot = self.db.read_tx();
-        Ok(snapshot
+        Ok(self
+            .tx
             .get(&ks, key.as_bytes())
             .map_err(io::Error::other)?
             .map(|b| b.to_vec()))
@@ -208,8 +208,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
                 .keyspace(table, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
-            let snapshot = self.db.read_tx();
-            for item in snapshot.iter(&ks) {
+            for item in self.tx.iter(&ks) {
                 let (k, v) = item.into_inner().map_err(io::Error::other)?;
                 let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
                 map.entry(k_str).or_insert(Some(v.to_vec()));

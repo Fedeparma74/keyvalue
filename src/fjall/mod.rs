@@ -14,7 +14,8 @@ mod transactional;
 
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
-const META_DELETED_KEYSPACE: &str = "meta_deleted";
+
+const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
 pub struct FjallDB {
     inner: SingleWriterTxDatabase,
