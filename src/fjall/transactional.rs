@@ -26,7 +26,7 @@ pub struct WriteTransaction {
     meta_deleted_keyspace: OptimisticTxKeyspace,
 }
 
-impl KVReadTransaction for ReadTransaction {
+impl<'a> KVReadTransaction<'a> for ReadTransaction {
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == META_DELETED_KEYSPACE {
             return Ok(None);
@@ -136,7 +136,7 @@ impl KVReadTransaction for ReadTransaction {
     }
 }
 
-impl KVReadTransaction for WriteTransaction {
+impl<'a> KVReadTransaction<'a> for WriteTransaction {
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == META_DELETED_KEYSPACE {
             return Ok(None);
@@ -250,7 +250,7 @@ impl KVReadTransaction for WriteTransaction {
     }
 }
 
-impl KVWriteTransaction for WriteTransaction {
+impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     fn insert(
         &mut self,
         table: &str,
@@ -390,10 +390,10 @@ impl KVWriteTransaction for WriteTransaction {
 }
 
 impl TransactionalKVDB for FjallDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
+    type ReadTransaction<'a> = ReadTransaction;
+    type WriteTransaction<'a> = WriteTransaction;
 
-    fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
+    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
         Ok(ReadTransaction {
             snapshot: self.inner.read_tx(),
             db: self.inner.clone(),
@@ -401,7 +401,7 @@ impl TransactionalKVDB for FjallDB {
         })
     }
 
-    fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
+    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
         let meta_deleted_keyspace = self
             .inner
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)

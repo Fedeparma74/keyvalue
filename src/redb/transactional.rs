@@ -19,7 +19,7 @@ pub struct WriteTransaction {
     tx: redb::WriteTransaction,
 }
 
-impl KVReadTransaction for ReadTransaction {
+impl<'a> KVReadTransaction<'a> for ReadTransaction {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let table_res = self
             .tx
@@ -76,7 +76,7 @@ impl KVReadTransaction for ReadTransaction {
     }
 }
 
-impl KVReadTransaction for WriteTransaction {
+impl<'a> KVReadTransaction<'a> for WriteTransaction {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         // check if the table exists
         if !self.contains_table(table_name)? {
@@ -144,7 +144,7 @@ impl KVReadTransaction for WriteTransaction {
     }
 }
 
-impl KVWriteTransaction for WriteTransaction {
+impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     fn insert(
         &mut self,
         table_name: &str,
@@ -202,10 +202,10 @@ impl KVWriteTransaction for WriteTransaction {
 }
 
 impl TransactionalKVDB for RedbDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
+    type ReadTransaction<'a> = ReadTransaction;
+    type WriteTransaction<'a> = WriteTransaction;
 
-    fn begin_read(&self) -> io::Result<Self::ReadTransaction> {
+    fn begin_read(&self) -> io::Result<Self::ReadTransaction<'_>> {
         let tx = self
             .inner
             .begin_read()
@@ -213,7 +213,7 @@ impl TransactionalKVDB for RedbDB {
         Ok(ReadTransaction { tx })
     }
 
-    fn begin_write(&self) -> io::Result<Self::WriteTransaction> {
+    fn begin_write(&self) -> io::Result<Self::WriteTransaction<'_>> {
         let tx = self
             .inner
             .begin_write()

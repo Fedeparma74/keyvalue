@@ -55,7 +55,7 @@ pub struct WriteTransaction {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for ReadTransaction {
+impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
     async fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let table_name = table_name.to_string();
         let key = key.to_string();
@@ -198,7 +198,7 @@ impl AsyncKVReadTransaction for ReadTransaction {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for WriteTransaction {
+impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
     async fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let table_name = table_name.to_string();
         let key = key.to_string();
@@ -536,7 +536,7 @@ impl AsyncKVReadTransaction for WriteTransaction {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVWriteTransaction for WriteTransaction {
+impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
     async fn insert(
         &mut self,
         table_name: &str,
@@ -769,16 +769,16 @@ impl AsyncKVWriteTransaction for WriteTransaction {
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncTransactionalKVDB for IndexedDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
+    type ReadTransaction<'a> = ReadTransaction;
+    type WriteTransaction<'a> = WriteTransaction;
 
-    async fn begin_read(&self) -> io::Result<ReadTransaction> {
+    async fn begin_read(&self) -> io::Result<Self::ReadTransaction<'_>> {
         Ok(ReadTransaction {
             command_request_sender: self.command_request_sender.clone(),
         })
     }
 
-    async fn begin_write(&self) -> io::Result<WriteTransaction> {
+    async fn begin_write(&self) -> io::Result<Self::WriteTransaction<'_>> {
         Ok(WriteTransaction {
             name: self.name.clone(),
             version: self.version.clone(),
