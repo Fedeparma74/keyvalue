@@ -142,9 +142,64 @@ impl IndexedDB {
             command_request_sender: command_sender,
         })
     }
+
+    async fn _get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        let get_closure = move |db: Rc<RwLock<Database>>| {
+            async move {
+                let db = db.read().await;
+                let table_name = table_name.to_string();
+                let key = key.to_string();
+                let value = match db
+                    .transaction(&[&table_name])
+                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                        let table = tx.object_store(&table_name)?;
+                        let value = table.get(&JsValue::from(key)).await?;
+                        Ok(value)
+                    })
+                    .await
+                    .map_err(indexed_db_error_to_io_error)
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::NotFound {
+                            return Ok(CommandResponse::Get(None));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+
+                Ok::<_, std::io::Error>(CommandResponse::Get(
+                    value.map(|v| Uint8Array::from(v).to_vec()),
+                ))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(get_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        if let CommandResponse::Get(value) = response {
+            return Ok(value);
+        }
+        if let CommandResponse::Error(e) = response {
+            return Err(e);
+        }
+
+        Err(io::Error::other("Unexpected response type"))
+    }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKeyValueDB for IndexedDB {
     async fn insert(
         &self,
@@ -152,7 +207,7 @@ impl AsyncKeyValueDB for IndexedDB {
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        let old_value = self.get(table_name, key).await?;
+        let old_value = self._get(table_name, key).await?;
 
         let name = self.name.clone();
         let version = self.version.clone();
@@ -226,61 +281,11 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        let table_name = table_name.to_string();
-        let key = key.to_string();
-        let get_closure = move |db: Rc<RwLock<Database>>| {
-            async move {
-                let db = db.read().await;
-                let table_name = table_name.to_string();
-                let key = key.to_string();
-                let value = match db
-                    .transaction(&[&table_name])
-                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                        let table = tx.object_store(&table_name)?;
-                        let value = table.get(&JsValue::from(key)).await?;
-                        Ok(value)
-                    })
-                    .await
-                    .map_err(indexed_db_error_to_io_error)
-                {
-                    Ok(value) => value,
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::NotFound {
-                            return Ok(CommandResponse::Get(None));
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                };
-
-                Ok::<_, std::io::Error>(CommandResponse::Get(
-                    value.map(|v| Uint8Array::from(v).to_vec()),
-                ))
-            }
-            .boxed_local()
-        };
-
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.command_request_sender
-            .unbounded_send((Box::new(get_closure), response_sender))
-            .map_err(|_| io::Error::other("Failed to send command request"))?;
-
-        let response = response_receiver
-            .await
-            .map_err(|_| io::Error::other("Failed to receive command response"))?;
-
-        if let CommandResponse::Get(value) = response {
-            return Ok(value);
-        }
-        if let CommandResponse::Error(e) = response {
-            return Err(e);
-        }
-
-        Err(io::Error::other("Unexpected response type"))
+        self._get(table_name, key).await
     }
 
     async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        if let Some(old_value) = self.get(table_name, key).await? {
+        if let Some(old_value) = self._get(table_name, key).await? {
             let name = self.name.clone();
             let version = self.version.clone();
             let table_name = table_name.to_string();
