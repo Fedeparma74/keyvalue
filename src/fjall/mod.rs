@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use fjall::{KeyspaceCreateOptions, OptimisticTxDatabase, Readable};
+use fjall::{KeyspaceCreateOptions, Readable, SingleWriterTxDatabase};
 
 use crate::KeyValueDB;
 
@@ -18,13 +18,13 @@ pub use self::transactional::{ReadTransaction, WriteTransaction};
 const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
 pub struct FjallDB {
-    inner: OptimisticTxDatabase,
+    inner: SingleWriterTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
 }
 
 impl FjallDB {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let inner = OptimisticTxDatabase::builder(path)
+        let inner = SingleWriterTxDatabase::builder(path)
             .open()
             .map_err(io::Error::other)?;
 
@@ -62,7 +62,7 @@ impl KeyValueDB for FjallDB {
             ));
         }
 
-        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
+        let mut write_tx = self.inner.write_tx();
 
         let table_str = table.to_string();
 
@@ -100,10 +100,7 @@ impl KeyValueDB for FjallDB {
             .map_err(io::Error::other)?
             .map(|v| v.to_vec());
         write_tx.insert(&ks, key_bytes, value);
-        write_tx
-            .commit()
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
+        write_tx.commit().map_err(io::Error::other)?;
 
         Ok(old)
     }
@@ -150,7 +147,7 @@ impl KeyValueDB for FjallDB {
             return Ok(None);
         }
 
-        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
+        let mut write_tx = self.inner.write_tx();
 
         let ks = self
             .inner
@@ -163,10 +160,7 @@ impl KeyValueDB for FjallDB {
             .map_err(io::Error::other)?
             .map(|v| v.to_vec());
         write_tx.remove(&ks, key_bytes);
-        write_tx
-            .commit()
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
+        write_tx.commit().map_err(io::Error::other)?;
 
         Ok(old)
     }
@@ -284,7 +278,7 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
+        let mut write_tx = self.inner.write_tx();
 
         if !self.inner.keyspace_exists(table) {
             return Ok(());
@@ -307,10 +301,7 @@ impl KeyValueDB for FjallDB {
 
         write_tx.insert(&meta_ks, table.as_bytes(), []);
 
-        write_tx
-            .commit()
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
+        write_tx.commit().map_err(io::Error::other)?;
 
         // Update global deleted tables set
         {
@@ -343,7 +334,7 @@ impl KeyValueDB for FjallDB {
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
 
-        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
+        let mut write_tx = self.inner.write_tx();
 
         for table_name in current_tables {
             if table_name == META_DELETED_KEYSPACE {
@@ -372,10 +363,7 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        write_tx
-            .commit()
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
+        write_tx.commit().map_err(io::Error::other)?;
 
         Ok(())
     }

@@ -2,10 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, RwLock};
 
-use fjall::{
-    KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace, OptimisticWriteTx, Readable,
-    Snapshot,
-};
+use fjall::{KeyspaceCreateOptions, Readable, SingleWriterTxDatabase, Snapshot};
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
@@ -13,17 +10,16 @@ use super::{FjallDB, META_DELETED_KEYSPACE};
 
 pub struct ReadTransaction {
     snapshot: Snapshot,
-    db: OptimisticTxDatabase,
+    db: SingleWriterTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
 }
 
 pub struct WriteTransaction {
-    db: OptimisticTxDatabase,
-    tx: OptimisticWriteTx,
+    db: SingleWriterTxDatabase,
+    snapshot: Snapshot,
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>, // For RYOW
     tx_deleted_tables: HashSet<String>,                         // Local to this transaction
     global_deleted_tables: Arc<RwLock<HashSet<String>>>,        // Shared global state
-    meta_deleted_keyspace: OptimisticTxKeyspace,
 }
 
 impl<'a> KVReadTransaction<'a> for ReadTransaction {
@@ -172,7 +168,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
             .map_err(io::Error::other)?;
 
         Ok(self
-            .tx
+            .snapshot
             .get(&ks, key.as_bytes())
             .map_err(io::Error::other)?
             .map(|b| b.to_vec()))
@@ -206,7 +202,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
                 .keyspace(table, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
-            for item in self.tx.iter(&ks) {
+            for item in self.snapshot.iter(&ks) {
                 let (k, v) = item.into_inner().map_err(io::Error::other)?;
                 let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
                 map.entry(k_str).or_insert(Some(v.to_vec()));
@@ -329,7 +325,14 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
         Ok(())
     }
 
-    fn commit(mut self) -> Result<(), io::Error> {
+    fn commit(self) -> Result<(), io::Error> {
+        let meta_deleted_keyspace = self
+            .db
+            .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
+            .map_err(io::Error::other)?;
+
+        let mut tx = self.db.write_tx();
+
         // Apply pending inserts/removes
         for (table, map) in self.pending {
             let ks = self
@@ -340,17 +343,15 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
             for (key_str, v_opt) in map {
                 let key_bytes = key_str.as_bytes();
                 match v_opt {
-                    Some(v) => self.tx.insert(&ks, key_bytes, &v),
-
-                    None => self.tx.remove(&ks, key_bytes),
+                    Some(v) => tx.insert(&ks, key_bytes, &v),
+                    None => tx.remove(&ks, key_bytes),
                 }
             }
 
-            // remove table from deleted meta if it was previously deleted
+            // remove table from deleted meta if it was previously deleted (undelete)
             let was_deleted = self.global_deleted_tables.read().unwrap().contains(&table);
             if was_deleted {
-                self.tx
-                    .insert(&self.meta_deleted_keyspace, table.as_bytes(), []);
+                tx.remove(&meta_deleted_keyspace, table.as_bytes());
                 self.global_deleted_tables.write().unwrap().remove(&table);
             }
         }
@@ -362,29 +363,24 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                 .keyspace(&table, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
-            for item in self.tx.iter(&ks) {
+            for item in tx.iter(&ks) {
                 let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
-                self.tx.remove(&ks, key_bytes);
+                tx.remove(&ks, key_bytes);
             }
 
             // Mark as deleted in persistent meta
-            self.tx
-                .insert(&self.meta_deleted_keyspace, table.as_bytes(), []);
+            tx.insert(&meta_deleted_keyspace, table.as_bytes(), []);
 
             // Update global deleted tables set
             self.global_deleted_tables.write().unwrap().insert(table);
         }
 
-        self.tx
-            .commit()
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
+        tx.commit().map_err(io::Error::other)?;
 
         Ok(())
     }
 
     fn abort(self) -> Result<(), io::Error> {
-        self.tx.rollback();
         Ok(())
     }
 }
@@ -402,18 +398,12 @@ impl TransactionalKVDB for FjallDB {
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
-        let meta_deleted_keyspace = self
-            .inner
-            .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
-            .map_err(io::Error::other)?;
-
         Ok(WriteTransaction {
             db: self.inner.clone(),
-            tx: self.inner.write_tx().map_err(io::Error::other)?,
+            snapshot: self.inner.read_tx(),
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
             global_deleted_tables: self.deleted_tables.clone(),
-            meta_deleted_keyspace,
         })
     }
 }
