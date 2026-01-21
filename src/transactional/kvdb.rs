@@ -10,7 +10,7 @@ pub trait TransactionalKVDB: MaybeSendSync + 'static {
     fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
 }
 
-pub trait KVReadTransaction: MaybeSendSync + 'static {
+pub trait KVReadTransaction: MaybeSendSync {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
     fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;

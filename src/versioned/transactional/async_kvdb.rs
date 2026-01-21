@@ -19,7 +19,7 @@ pub trait AsyncVersionedTransactionalKVDB: MaybeSendSync + 'static {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-pub trait AsyncKVReadVersionedTransaction: MaybeSendSync + 'static {
+pub trait AsyncKVReadVersionedTransaction: MaybeSendSync {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
     async fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -120,7 +120,6 @@ pub trait AsyncKVWriteVersionedTransaction: AsyncKVReadVersionedTransaction {
 impl<T: AsyncTransactionalKVDB> AsyncVersionedTransactionalKVDB for T {
     type ReadTransaction = T::ReadTransaction;
     type WriteTransaction = T::WriteTransaction;
-
     async fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
         AsyncTransactionalKVDB::begin_read(self).await
     }

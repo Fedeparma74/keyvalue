@@ -1,14 +1,15 @@
 use std::{io, path::Path};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
-#[cfg(feature = "transactional")]
-pub use redb::{ReadTransaction, WriteTransaction};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 
 use crate::KeyValueDB;
 
 #[cfg(feature = "transactional")]
 mod transactional;
+
+#[cfg(feature = "transactional")]
+pub use self::transactional::{ReadTransaction, WriteTransaction};
 
 #[derive(Debug)]
 pub struct RedbDB {
@@ -159,6 +160,27 @@ impl KeyValueDB for RedbDB {
         write_transaction
             .delete_table(TableDefinition::<&str, &[u8]>::new(table_name))
             .map_err(table_error_to_io_error)?;
+        write_transaction
+            .commit()
+            .map_err(commit_error_to_io_error)?;
+
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), io::Error> {
+        let write_transaction = self
+            .inner
+            .begin_write()
+            .map_err(transaction_error_to_io_error)?;
+
+        for table_name in write_transaction
+            .list_tables()
+            .map_err(storage_error_to_io_error)?
+        {
+            write_transaction
+                .delete_table(TableDefinition::<&str, &[u8]>::new(table_name.name()))
+                .map_err(table_error_to_io_error)?;
+        }
         write_transaction
             .commit()
             .map_err(commit_error_to_io_error)?;

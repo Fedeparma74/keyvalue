@@ -17,7 +17,6 @@ pub use self::transactional::{ReadTransaction, WriteTransaction};
 
 const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
-#[derive(Clone)]
 pub struct FjallDB {
     inner: OptimisticTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
@@ -52,53 +51,6 @@ impl FjallDB {
             deleted_tables: deleted,
         })
     }
-
-    /// Persist a deleted table name (insert key with empty value)
-    fn mark_deleted(&self, table: &str) -> io::Result<()> {
-        let meta_ks = self
-            .inner
-            .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
-            .map_err(io::Error::other)?;
-
-        // Insert table name as key with empty value
-        meta_ks
-            .insert(table.as_bytes(), [])
-            .map_err(io::Error::other)?;
-
-        // Also update in-memory set
-        {
-            let mut deleted_tables = self.deleted_tables.write().unwrap();
-            deleted_tables.insert(table.to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Remove all keys from the given keyspace
-    fn clear_keyspace(&self, table: &str) -> io::Result<()> {
-        if !self.inner.keyspace_exists(table) {
-            return Ok(());
-        }
-
-        let ks = self
-            .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
-            .map_err(io::Error::other)?;
-
-        // Use a write tx to remove all keys
-        let mut tx = self.inner.write_tx().map_err(io::Error::other)?;
-
-        for item in tx.iter(&ks) {
-            let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
-            tx.remove(&ks, key_bytes);
-        }
-
-        tx.commit()
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
-
-        Ok(())
-    }
 }
 
 impl KeyValueDB for FjallDB {
@@ -109,6 +61,8 @@ impl KeyValueDB for FjallDB {
                 "Cannot insert into meta deleted keyspace",
             ));
         }
+
+        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
 
         let table_str = table.to_string();
 
@@ -131,7 +85,7 @@ impl KeyValueDB for FjallDB {
                 .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
-            meta_ks.remove(table.as_bytes()).map_err(io::Error::other)?;
+            write_tx.remove(&meta_ks, table.as_bytes());
         }
 
         // Now proceed with the insert (keyspace will be created/opened automatically)
@@ -141,11 +95,15 @@ impl KeyValueDB for FjallDB {
             .map_err(io::Error::other)?;
 
         let key_bytes = key.as_bytes();
-        let old = ks
-            .get(key_bytes)
+        let old = write_tx
+            .get(&ks, key_bytes)
             .map_err(io::Error::other)?
             .map(|v| v.to_vec());
-        ks.insert(key_bytes, value).map_err(io::Error::other)?;
+        write_tx.insert(&ks, key_bytes, value);
+        write_tx
+            .commit()
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
 
         Ok(old)
     }
@@ -192,17 +150,24 @@ impl KeyValueDB for FjallDB {
             return Ok(None);
         }
 
+        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
+
         let ks = self
             .inner
             .keyspace(table, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
 
         let key_bytes = key.as_bytes();
-        let old = ks
-            .get(key_bytes)
+        let old = write_tx
+            .get(&ks, key_bytes)
             .map_err(io::Error::other)?
             .map(|v| v.to_vec());
-        ks.remove(key_bytes).map_err(io::Error::other)?;
+        write_tx.remove(&ks, key_bytes);
+        write_tx
+            .commit()
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
+
         Ok(old)
     }
 
@@ -319,20 +284,99 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        // 1. Clear all data in the keyspace
-        self.clear_keyspace(table)?;
+        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
 
-        // 2. Mark as deleted (add key with empty value to meta)
-        self.mark_deleted(table)?;
+        if !self.inner.keyspace_exists(table) {
+            return Ok(());
+        }
+
+        let ks = self
+            .inner
+            .keyspace(table, KeyspaceCreateOptions::default)
+            .map_err(io::Error::other)?;
+
+        for item in write_tx.iter(&ks) {
+            let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
+            write_tx.remove(&ks, key_bytes);
+        }
+
+        let meta_ks = self
+            .inner
+            .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
+            .map_err(io::Error::other)?;
+
+        write_tx.insert(&meta_ks, table.as_bytes(), []);
+
+        write_tx
+            .commit()
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
+
+        // Update global deleted tables set
+        {
+            let mut guard = self.deleted_tables.write().unwrap();
+            guard.insert(table.to_string());
+        }
 
         Ok(())
     }
 
     fn clear(&self) -> Result<(), io::Error> {
-        let current_tables = self.table_names()?;
-        for table in current_tables {
-            self.delete_table(&table)?;
+        // Exclude internal meta and deleted tables
+        let current_tables = {
+            let deleted_tables = self.deleted_tables.read().unwrap();
+            self.inner
+                .list_keyspace_names()
+                .iter()
+                .filter_map(|n| {
+                    if n.as_ref() != META_DELETED_KEYSPACE && !deleted_tables.contains(n.as_ref()) {
+                        Some(n.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<String>>()
+        };
+
+        let meta_ks = self
+            .inner
+            .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
+            .map_err(io::Error::other)?;
+
+        let mut write_tx = self.inner.write_tx().map_err(io::Error::other)?;
+
+        for table_name in current_tables {
+            if table_name == META_DELETED_KEYSPACE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot delete meta deleted keyspace",
+                ));
+            }
+
+            let ks = self
+                .inner
+                .keyspace(&table_name, KeyspaceCreateOptions::default)
+                .map_err(io::Error::other)?;
+
+            for item in write_tx.iter(&ks) {
+                let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
+                write_tx.remove(&ks, key_bytes);
+            }
+
+            write_tx.insert(&meta_ks, table_name.as_bytes(), []);
+
+            // Update global deleted tables set
+            {
+                let mut guard = self.deleted_tables.write().unwrap();
+                guard.insert(table_name.to_string());
+            }
         }
+
+        write_tx
+            .commit()
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
+
         Ok(())
     }
 }

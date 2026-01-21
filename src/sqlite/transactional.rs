@@ -71,6 +71,7 @@ impl AsyncKVReadTransaction for ReadTransaction {
         Ok(out)
     }
 }
+
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKVReadTransaction for WriteTransaction {
@@ -126,6 +127,7 @@ impl AsyncKVReadTransaction for WriteTransaction {
         Ok(out)
     }
 }
+
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKVWriteTransaction for WriteTransaction {
@@ -192,6 +194,7 @@ impl AsyncKVWriteTransaction for WriteTransaction {
         Ok(())
     }
 }
+
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncTransactionalKVDB for SqliteDB {

@@ -13,7 +13,7 @@ pub trait VersionedTransactionalKVDB: MaybeSendSync + 'static {
     fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error>;
 }
 
-pub trait KVReadVersionedTransaction: MaybeSendSync + 'static {
+pub trait KVReadVersionedTransaction: MaybeSendSync {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;

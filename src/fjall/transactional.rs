@@ -330,7 +330,7 @@ impl KVWriteTransaction for WriteTransaction {
     }
 
     fn commit(mut self) -> Result<(), io::Error> {
-        // 1. Apply pending inserts/removes
+        // Apply pending inserts/removes
         for (table, map) in self.pending {
             let ks = self
                 .db
@@ -349,14 +349,13 @@ impl KVWriteTransaction for WriteTransaction {
             // remove table from deleted meta if it was previously deleted
             let was_deleted = self.global_deleted_tables.read().unwrap().contains(&table);
             if was_deleted {
-                self.meta_deleted_keyspace
-                    .remove(table.as_bytes())
-                    .map_err(io::Error::other)?;
+                self.tx
+                    .insert(&self.meta_deleted_keyspace, table.as_bytes(), []);
                 self.global_deleted_tables.write().unwrap().remove(&table);
             }
         }
 
-        // 3. Apply deletions (clear keyspaces marked deleted in this tx)
+        // Apply deletions (clear keyspaces marked deleted in this tx)
         for table in self.tx_deleted_tables {
             let ks = self
                 .db
@@ -369,9 +368,8 @@ impl KVWriteTransaction for WriteTransaction {
             }
 
             // Mark as deleted in persistent meta
-            self.meta_deleted_keyspace
-                .insert(table.as_bytes(), [])
-                .map_err(io::Error::other)?;
+            self.tx
+                .insert(&self.meta_deleted_keyspace, table.as_bytes(), []);
 
             // Update global deleted tables set
             self.global_deleted_tables.write().unwrap().insert(table);

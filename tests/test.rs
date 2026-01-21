@@ -105,12 +105,14 @@ mod tests {
         common::persist_test_data(Box::new(db));
         let db = keyvalue::redb::RedbDB::open(&path).unwrap();
         common::check_test_data(&db);
-        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
-        assert!(
-            !keyvalue::KVReadTransaction::table_names(&read)
-                .unwrap()
-                .is_empty()
-        );
+        {
+            let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+            assert!(
+                !keyvalue::KVReadTransaction::table_names(&read)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let mut write = keyvalue::TransactionalKVDB::begin_write(&db).unwrap();
         keyvalue::KVWriteTransaction::clear(&mut write).unwrap();
         assert!(
@@ -137,15 +139,17 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::redb::RedbDB::open(&path).unwrap();
         common::check_test_data_async(&db).await;
-        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
-            .await
-            .unwrap();
-        assert!(
-            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+        {
+            let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
                 .await
-                .unwrap()
-                .is_empty()
-        );
+                .unwrap();
+            assert!(
+                !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
             .await
             .unwrap();
@@ -222,12 +226,14 @@ mod tests {
         common::persist_test_data(Box::new(db));
         let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
         common::check_test_data(&db);
-        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
-        assert!(
-            !keyvalue::KVReadTransaction::table_names(&read)
-                .unwrap()
-                .is_empty()
-        );
+        {
+            let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+            assert!(
+                !keyvalue::KVReadTransaction::table_names(&read)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let mut write = keyvalue::TransactionalKVDB::begin_write(&db).unwrap();
         keyvalue::KVWriteTransaction::clear(&mut write).unwrap();
         assert!(
@@ -254,15 +260,17 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
         common::check_test_data_async(&db).await;
-        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
-            .await
-            .unwrap();
-        assert!(
-            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+        {
+            let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
                 .await
-                .unwrap()
-                .is_empty()
-        );
+                .unwrap();
+            assert!(
+                !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
             .await
             .unwrap();
@@ -299,15 +307,17 @@ mod tests {
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
         common::check_test_data_async(&db).await;
-        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
-            .await
-            .unwrap();
-        assert!(
-            !keyvalue::AsyncKVReadTransaction::table_names(&read)
+        {
+            let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
                 .await
-                .unwrap()
-                .is_empty()
-        );
+                .unwrap();
+            assert!(
+                !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
             .await
             .unwrap();

@@ -18,7 +18,7 @@ pub trait AsyncTransactionalKVDB: MaybeSendSync + 'static {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-pub trait AsyncKVReadTransaction: MaybeSendSync + 'static {
+pub trait AsyncKVReadTransaction: MaybeSendSync {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error>;
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
     async fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -79,8 +79,8 @@ pub trait AsyncKVWriteTransaction: AsyncKVReadTransaction {
         Ok(())
     }
     async fn clear(&mut self) -> Result<(), io::Error> {
-        for table_name in self.table_names().await? {
-            self.delete_table(&table_name).await?;
+        for table in self.table_names().await? {
+            self.delete_table(&table).await?;
         }
         Ok(())
     }

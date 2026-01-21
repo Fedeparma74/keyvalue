@@ -8,6 +8,7 @@ use crate::AsyncKeyValueDB;
 mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
+
 #[derive(Debug)]
 pub struct SqliteDB {
     conn: Arc<Connection>,
