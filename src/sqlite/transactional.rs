@@ -18,7 +18,7 @@ pub struct WriteTransaction {
 }
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for ReadTransaction {
+impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if !table_exists(&self.conn, table).await? {
             return Ok(None);
@@ -74,7 +74,7 @@ impl AsyncKVReadTransaction for ReadTransaction {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVReadTransaction for WriteTransaction {
+impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if !table_exists(&self.conn, table).await? {
             return Ok(None);
@@ -130,7 +130,7 @@ impl AsyncKVReadTransaction for WriteTransaction {
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncKVWriteTransaction for WriteTransaction {
+impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
     async fn insert(
         &mut self,
         table: &str,
@@ -198,14 +198,14 @@ impl AsyncKVWriteTransaction for WriteTransaction {
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncTransactionalKVDB for SqliteDB {
-    type ReadTransaction = ReadTransaction;
-    type WriteTransaction = WriteTransaction;
-    async fn begin_read(&self) -> Result<Self::ReadTransaction, io::Error> {
+    type ReadTransaction<'a> = ReadTransaction;
+    type WriteTransaction<'a> = WriteTransaction;
+    async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
         Ok(ReadTransaction {
             conn: self.conn.clone(),
         })
     }
-    async fn begin_write(&self) -> Result<Self::WriteTransaction, io::Error> {
+    async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
         self.conn
             .execute("BEGIN CONCURRENT", ())
             .await
