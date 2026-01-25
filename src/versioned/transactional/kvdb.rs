@@ -62,11 +62,14 @@ pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
         value: &[u8],
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
+    /// Removes the entry from the table. If `version` is provided, the entry is marked as deleted
+    /// by setting its value to `None` and updating its version. If `version` is `None`, the entry is
+    /// permanently removed.
     fn remove(
         &mut self,
         table_name: &str,
         key: &str,
-        version: u64,
+        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error>;
     fn commit(self) -> Result<(), io::Error>;
     fn abort(self) -> Result<(), io::Error>;
@@ -89,19 +92,29 @@ pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
         };
         match value {
             Some(v) => self.insert(table_name, key, v, new_version),
-            None => self.remove(table_name, key, new_version),
+            None => self.remove(table_name, key, Some(new_version)),
         }
     }
 
-    fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
+    /// Deletes all the entries in the specified table. If `prune` is false, the entries are
+    /// marked as deleted by setting their value to `None` and increasing their version.
+    /// If `prune` is true, the entries are permanently removed.
+    fn delete_table(&mut self, table_name: &str, prune: bool) -> Result<(), io::Error> {
         for key in self.keys(table_name)? {
-            self.update(table_name, &key, None)?;
+            if prune {
+                self.remove(table_name, &key, None)?;
+            } else {
+                self.update(table_name, &key, None)?;
+            }
         }
         Ok(())
     }
-    fn clear(&mut self) -> Result<(), io::Error> {
+    /// Clears all the tables in the database. If `prune` is false, the entries are
+    /// marked as deleted by setting their value to `None` and increasing their version.
+    /// If `prune` is true, the entries are permanently removed.
+    fn clear(&mut self, prune: bool) -> Result<(), io::Error> {
         for table_name in self.table_names()? {
-            self.delete_table(&table_name)?;
+            self.delete_table(&table_name, prune)?;
         }
         Ok(())
     }
@@ -209,31 +222,51 @@ where
         &mut self,
         table_name: &str,
         key: &str,
-        version: u64,
+        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let old_value = KVWriteTransaction::remove(self, table_name, key)?;
-        if let Some(old_value) = old_value {
-            let obj = decode(&old_value)?;
+        if let Some(version) = version {
+            if let Some(old_value) = old_value {
+                let obj = decode(&old_value)?;
 
-            let new_obj = VersionedObject {
-                value: None,
-                version,
-            };
+                let new_obj = VersionedObject {
+                    value: None,
+                    version,
+                };
 
-            KVWriteTransaction::insert(self, table_name, key, &encode(&new_obj))?;
+                KVWriteTransaction::insert(self, table_name, key, &encode(&new_obj))?;
 
-            Ok(Some(obj))
+                Ok(Some(obj))
+            } else {
+                Ok(None)
+            }
         } else {
-            Ok(None)
+            Ok(old_value.map(|ov| decode(&ov)).transpose()?)
         }
     }
 
-    fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
-        KVWriteTransaction::delete_table(self, table_name)
+    fn delete_table(&mut self, table_name: &str, prune: bool) -> Result<(), io::Error> {
+        if prune {
+            KVWriteTransaction::delete_table(self, table_name)?;
+        } else {
+            for key in self.keys(table_name)? {
+                KVWriteVersionedTransaction::update(self, table_name, &key, None)?;
+            }
+        }
+
+        Ok(())
     }
 
-    fn clear(&mut self) -> Result<(), io::Error> {
-        KVWriteTransaction::clear(self)
+    fn clear(&mut self, prune: bool) -> Result<(), io::Error> {
+        if prune {
+            KVWriteTransaction::clear(self)?;
+        } else {
+            for table_name in self.table_names()? {
+                KVWriteVersionedTransaction::delete_table(self, &table_name, false)?;
+            }
+        }
+
+        Ok(())
     }
 
     fn commit(self) -> Result<(), io::Error> {
