@@ -63,21 +63,20 @@ pub trait AsyncKVReadVersionedTransaction<'a>: MaybeSendSync {
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<'a> {
+    /// Inserts or updates the value of the key in the table with the specified version.
+    /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.
     async fn insert(
         &mut self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
-    /// Removes the entry from the table. If `version` is provided, the entry is marked as deleted
-    /// by setting its value to `None` and updating its version. If `version` is `None`, the entry is
-    /// permanently removed.
+    /// Permanently removes the entry from the table.
     async fn remove(
         &mut self,
         table_name: &str,
         key: &str,
-        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error>;
     async fn commit(self) -> Result<(), io::Error>;
     async fn abort(self) -> Result<(), io::Error>;
@@ -98,10 +97,7 @@ pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<
             ))?,
             None => 1,
         };
-        match value {
-            Some(v) => self.insert(table_name, key, v, new_version).await,
-            None => self.remove(table_name, key, Some(new_version)).await,
-        }
+        AsyncKVWriteVersionedTransaction::insert(self, table_name, key, value, new_version).await
     }
 
     /// Deletes all the entries in the specified table. If `prune` is false, the entries are
@@ -110,9 +106,9 @@ pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<
     async fn delete_table(&mut self, table_name: &str, prune: bool) -> Result<(), io::Error> {
         for key in self.keys(table_name).await? {
             if prune {
-                self.remove(table_name, &key, None).await?;
+                AsyncKVWriteVersionedTransaction::remove(self, table_name, &key).await?;
             } else {
-                self.update(table_name, &key, None).await?;
+                AsyncKVWriteVersionedTransaction::update(self, table_name, &key, None).await?;
             }
         }
         Ok(())
@@ -122,7 +118,7 @@ pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<
     /// If `prune` is true, the entries are permanently removed.
     async fn clear(&mut self, prune: bool) -> Result<(), io::Error> {
         for table_name in self.table_names().await? {
-            self.delete_table(&table_name, prune).await?;
+            AsyncKVWriteVersionedTransaction::delete_table(self, &table_name, prune).await?;
         }
         Ok(())
     }
@@ -214,11 +210,11 @@ where
         &mut self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: Some(value.to_vec()),
+            value: value.map(|v| v.to_vec()),
             version,
         };
 
@@ -235,27 +231,11 @@ where
         &mut self,
         table_name: &str,
         key: &str,
-        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = AsyncKVWriteTransaction::remove(self, table_name, key).await?;
-        if let Some(version) = version {
-            if let Some(old_value) = old_value {
-                let obj = decode(&old_value)?;
-
-                let new_obj = VersionedObject {
-                    value: None,
-                    version,
-                };
-
-                AsyncKVWriteTransaction::insert(self, table_name, key, &encode(&new_obj)).await?;
-
-                Ok(Some(obj))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(old_value.map(|v| decode(&v)).transpose()?)
-        }
+        AsyncKVWriteTransaction::remove(self, table_name, key)
+            .await?
+            .map(|old_value| decode(&old_value))
+            .transpose()
     }
 
     async fn delete_table(&mut self, table_name: &str, prune: bool) -> Result<(), io::Error> {

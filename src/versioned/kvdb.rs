@@ -8,23 +8,18 @@ use alloc::{
 use super::VersionedObject;
 
 pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
+    /// Inserts or updates the value of the key in the table with the specified version.
+    /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.
     fn insert(
         &self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
-    /// Removes the entry from the table. If `version` is provided, the entry is marked as deleted
-    /// by setting its value to `None` and updating its version. If `version` is `None`, the entry is
-    /// permanently removed.
-    fn remove(
-        &self,
-        table_name: &str,
-        key: &str,
-        version: Option<u64>,
-    ) -> Result<Option<VersionedObject>, io::Error>;
+    /// Permanently removes the entry from the table.
+    fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
     #[allow(clippy::type_complexity)]
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
     fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -45,10 +40,7 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
             ))?,
             None => 1,
         };
-        match value {
-            Some(v) => VersionedKeyValueDB::insert(self, table_name, key, v, new_version),
-            None => VersionedKeyValueDB::remove(self, table_name, key, Some(new_version)),
-        }
+        VersionedKeyValueDB::insert(self, table_name, key, value, new_version)
     }
 
     #[allow(clippy::type_complexity)]
@@ -91,7 +83,7 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
     fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
         for key in VersionedKeyValueDB::keys(self, table_name)? {
             if prune {
-                VersionedKeyValueDB::remove(self, table_name, &key, None)?;
+                VersionedKeyValueDB::remove(self, table_name, &key)?;
             } else {
                 VersionedKeyValueDB::update(self, table_name, &key, None)?;
             }
@@ -114,11 +106,11 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
         &self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: Some(value.to_vec()),
+            value: value.map(|v| v.to_vec()),
             version,
         };
 
@@ -138,31 +130,10 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
             Ok(None)
         }
     }
-    fn remove(
-        &self,
-        table_name: &str,
-        key: &str,
-        version: Option<u64>,
-    ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = KeyValueDB::remove(self, table_name, key)?;
-        if let Some(version) = version {
-            if let Some(old_value) = old_value {
-                let obj = decode(&old_value)?;
-
-                let new_obj = VersionedObject {
-                    value: None,
-                    version,
-                };
-
-                KeyValueDB::insert(self, table_name, key, &encode(&new_obj))?;
-
-                Ok(Some(obj))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(old_value.map(|v| decode(&v)).transpose()?)
-        }
+    fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
+        KeyValueDB::remove(self, table_name, key)?
+            .map(|v| decode(&v))
+            .transpose()
     }
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
@@ -233,11 +204,11 @@ where
         &self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: Some(value.to_vec()),
+            value: value.map(|v| v.to_vec()),
             version,
         };
 
@@ -257,31 +228,10 @@ where
             Ok(None)
         }
     }
-    fn remove(
-        &self,
-        table_name: &str,
-        key: &str,
-        version: Option<u64>,
-    ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = KeyValueDB::remove(self, table_name, key)?;
-        if let Some(version) = version {
-            if let Some(old_value) = old_value {
-                let obj = decode(&old_value)?;
-
-                let new_obj = VersionedObject {
-                    value: None,
-                    version,
-                };
-
-                KeyValueDB::insert(self, table_name, key, &encode(&new_obj))?;
-
-                Ok(Some(obj))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(old_value.map(|v| decode(&v)).transpose()?)
-        }
+    fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
+        KeyValueDB::remove(self, table_name, key)?
+            .map(|v| decode(&v))
+            .transpose()
     }
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();

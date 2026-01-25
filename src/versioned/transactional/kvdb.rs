@@ -55,22 +55,18 @@ pub trait KVReadVersionedTransaction<'a>: MaybeSendSync {
 }
 
 pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
+    /// Inserts or updates the value of the key in the table with the specified version.
+    /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.
     fn insert(
         &mut self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
-    /// Removes the entry from the table. If `version` is provided, the entry is marked as deleted
-    /// by setting its value to `None` and updating its version. If `version` is `None`, the entry is
-    /// permanently removed.
-    fn remove(
-        &mut self,
-        table_name: &str,
-        key: &str,
-        version: Option<u64>,
-    ) -> Result<Option<VersionedObject>, io::Error>;
+    /// Permanently removes the entry from the table.
+    fn remove(&mut self, table_name: &str, key: &str)
+    -> Result<Option<VersionedObject>, io::Error>;
     fn commit(self) -> Result<(), io::Error>;
     fn abort(self) -> Result<(), io::Error>;
 
@@ -90,10 +86,7 @@ pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
             ))?,
             None => 1,
         };
-        match value {
-            Some(v) => self.insert(table_name, key, v, new_version),
-            None => self.remove(table_name, key, Some(new_version)),
-        }
+        KVWriteVersionedTransaction::insert(self, table_name, key, value, new_version)
     }
 
     /// Deletes all the entries in the specified table. If `prune` is false, the entries are
@@ -102,9 +95,9 @@ pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
     fn delete_table(&mut self, table_name: &str, prune: bool) -> Result<(), io::Error> {
         for key in self.keys(table_name)? {
             if prune {
-                self.remove(table_name, &key, None)?;
+                KVWriteVersionedTransaction::remove(self, table_name, &key)?;
             } else {
-                self.update(table_name, &key, None)?;
+                KVWriteVersionedTransaction::update(self, table_name, &key, None)?;
             }
         }
         Ok(())
@@ -114,7 +107,7 @@ pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
     /// If `prune` is true, the entries are permanently removed.
     fn clear(&mut self, prune: bool) -> Result<(), io::Error> {
         for table_name in self.table_names()? {
-            self.delete_table(&table_name, prune)?;
+            KVWriteVersionedTransaction::delete_table(self, &table_name, prune)?;
         }
         Ok(())
     }
@@ -202,11 +195,11 @@ where
         &mut self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: Some(value.to_vec()),
+            value: value.map(|v| v.to_vec()),
             version,
         };
 
@@ -222,27 +215,10 @@ where
         &mut self,
         table_name: &str,
         key: &str,
-        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = KVWriteTransaction::remove(self, table_name, key)?;
-        if let Some(version) = version {
-            if let Some(old_value) = old_value {
-                let obj = decode(&old_value)?;
-
-                let new_obj = VersionedObject {
-                    value: None,
-                    version,
-                };
-
-                KVWriteTransaction::insert(self, table_name, key, &encode(&new_obj))?;
-
-                Ok(Some(obj))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(old_value.map(|ov| decode(&ov)).transpose()?)
-        }
+        KVWriteTransaction::remove(self, table_name, key)?
+            .map(|v| decode(&v))
+            .transpose()
     }
 
     fn delete_table(&mut self, table_name: &str, prune: bool) -> Result<(), io::Error> {

@@ -9,22 +9,21 @@ use super::VersionedObject;
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
+    /// Inserts or updates the value of the key in the table with the specified version.
+    /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.
     async fn insert(
         &self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error>;
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
-    /// Removes the entry from the table. If `version` is provided, the entry is marked as deleted
-    /// by setting its value to `None` and updating its version. If `version` is `None`, the entry is
-    /// permanently removed.
+    /// Permanently removes the entry from the table.
     async fn remove(
         &self,
         table_name: &str,
         key: &str,
-        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error>;
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
     async fn table_names(&self) -> Result<Vec<String>, io::Error>;
@@ -45,14 +44,7 @@ pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
             ))?,
             None => 1,
         };
-        match value {
-            Some(v) => {
-                AsyncVersionedKeyValueDB::insert(self, table_name, key, v, new_version).await
-            }
-            None => {
-                AsyncVersionedKeyValueDB::remove(self, table_name, key, Some(new_version)).await
-            }
-        }
+        AsyncVersionedKeyValueDB::insert(self, table_name, key, value, new_version).await
     }
 
     #[allow(clippy::type_complexity)]
@@ -99,7 +91,7 @@ pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
     async fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
         for key in AsyncVersionedKeyValueDB::keys(self, table_name).await? {
             if prune {
-                AsyncVersionedKeyValueDB::remove(self, table_name, &key, None).await?;
+                AsyncVersionedKeyValueDB::remove(self, table_name, &key).await?;
             } else {
                 AsyncVersionedKeyValueDB::update(self, table_name, &key, None).await?;
             }
@@ -124,11 +116,11 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
         &self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: Some(value.to_vec()),
+            value: value.map(|v| v.to_vec()),
             version,
         };
 
@@ -152,27 +144,11 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
         &self,
         table_name: &str,
         key: &str,
-        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = AsyncKeyValueDB::remove(self, table_name, key).await?;
-        if let Some(version) = version {
-            if let Some(old_value) = old_value {
-                let obj = decode(&old_value)?;
-
-                let new_obj = VersionedObject {
-                    value: None,
-                    version,
-                };
-
-                AsyncKeyValueDB::insert(self, table_name, key, &encode(&new_obj)).await?;
-
-                Ok(Some(obj))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(old_value.map(|v| decode(&v)).transpose()?)
-        }
+        AsyncKeyValueDB::remove(self, table_name, key)
+            .await?
+            .map(|v| decode(&v))
+            .transpose()
     }
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
@@ -245,11 +221,11 @@ where
         &self,
         table_name: &str,
         key: &str,
-        value: &[u8],
+        value: Option<&[u8]>,
         version: u64,
     ) -> Result<Option<VersionedObject>, io::Error> {
         let obj = VersionedObject {
-            value: Some(value.to_vec()),
+            value: value.map(|v| v.to_vec()),
             version,
         };
 
@@ -273,27 +249,11 @@ where
         &self,
         table_name: &str,
         key: &str,
-        version: Option<u64>,
     ) -> Result<Option<VersionedObject>, io::Error> {
-        let old_value = AsyncKeyValueDB::remove(self, table_name, key).await?;
-        if let Some(version) = version {
-            if let Some(old_value) = old_value {
-                let obj = decode(&old_value)?;
-
-                let new_obj = VersionedObject {
-                    value: None,
-                    version,
-                };
-
-                AsyncKeyValueDB::insert(self, table_name, key, &encode(&new_obj)).await?;
-
-                Ok(Some(obj))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(old_value.map(|v| decode(&v)).transpose()?)
-        }
+        AsyncKeyValueDB::remove(self, table_name, key)
+            .await?
+            .map(|v| decode(&v))
+            .transpose()
     }
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
