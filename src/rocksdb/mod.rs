@@ -1,8 +1,8 @@
 use std::{io, path::Path, sync::Arc};
 
 use rust_rocksdb::{
-    ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options,
-    WriteBatch,
+    ColumnFamilyDescriptor, DBCompressionType, DBWithThreadMode, Direction, IteratorMode,
+    MultiThreaded, Options, WriteBatch,
 };
 
 use crate::KeyValueDB;
@@ -27,6 +27,21 @@ impl RocksDB {
     pub fn open(path: &Path) -> io::Result<Self> {
         let path_str = path.to_string_lossy().to_string();
         let mut opts = Options::default();
+        // More background threads (flush + compaction)
+        opts.increase_parallelism(num_cpus::get() as i32);
+
+        // Larger memtable → fewer flushes
+        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
+
+        // Allow more immutable memtables before stalling
+        opts.set_max_write_buffer_number(6);
+
+        // Merge memtables before flushing (reduces L0 pressure)
+        opts.set_min_write_buffer_number_to_merge(2);
+
+        // Compression — LZ4 is usually fastest for write-heavy
+        opts.set_compression_type(DBCompressionType::Lz4);
+
         opts.create_if_missing(true);
 
         let cfs = Rocks::list_cf(&opts, path).unwrap_or_default();
