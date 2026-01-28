@@ -1,7 +1,7 @@
 use std::{io, path::Path};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
-use redb::{ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
+use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 
 use crate::KeyValueDB;
 
@@ -26,10 +26,14 @@ impl RedbDB {
 
 impl KeyValueDB for RedbDB {
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let write_transaction = self
+        let mut write_transaction = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
+        write_transaction
+            .set_durability(Durability::Immediate)
+            .map_err(io::Error::other)?;
+        write_transaction.set_quick_repair(true);
         let old_value = {
             let mut table = write_transaction
                 .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
@@ -73,10 +77,14 @@ impl KeyValueDB for RedbDB {
     }
 
     fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let write_transaction = self
+        let mut write_transaction = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
+        write_transaction
+            .set_durability(Durability::Immediate)
+            .map_err(io::Error::other)?;
+        write_transaction.set_quick_repair(true);
         let old_value = {
             let table_res =
                 write_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
@@ -153,10 +161,14 @@ impl KeyValueDB for RedbDB {
     }
 
     fn delete_table(&self, table_name: &str) -> io::Result<()> {
-        let write_transaction = self
+        let mut write_transaction = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
+        write_transaction
+            .set_durability(Durability::Immediate)
+            .map_err(io::Error::other)?;
+        write_transaction.set_quick_repair(true);
         write_transaction
             .delete_table(TableDefinition::<&str, &[u8]>::new(table_name))
             .map_err(table_error_to_io_error)?;
@@ -168,10 +180,14 @@ impl KeyValueDB for RedbDB {
     }
 
     fn clear(&self) -> Result<(), io::Error> {
-        let write_transaction = self
+        let mut write_transaction = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
+        write_transaction
+            .set_durability(Durability::Immediate)
+            .map_err(io::Error::other)?;
+        write_transaction.set_quick_repair(true);
 
         for table_name in write_transaction
             .list_tables()
