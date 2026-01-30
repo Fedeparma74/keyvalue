@@ -42,36 +42,6 @@ impl SqliteDB {
         .await
         .map_err(io::Error::other)?;
         let conn = inner.connect().map_err(io::Error::other)?;
-        // Set MVCC journal mode
-        let mut rows = conn
-            .query("PRAGMA journal_mode = experimental_mvcc", ())
-            .await
-            .map_err(io::Error::other)?;
-        // consume the result to confirm it worked
-        if let Some(row) = rows.next().await.map_err(io::Error::other)? {
-            let mode: String = row.get(0).map_err(io::Error::other)?;
-            if mode != "experimental_mvcc" {
-                return Err(io::Error::other(format!(
-                    "Failed to set MVCC journal mode, got: {}",
-                    mode
-                )));
-            }
-        }
-        // Set synchronous = NORMAL
-        let mut rows = conn
-            .query("PRAGMA synchronous = NORMAL", ())
-            .await
-            .map_err(io::Error::other)?;
-        if let Some(row) = rows.next().await.map_err(io::Error::other)? {
-            let value: i64 = row.get(0).map_err(io::Error::other)?;
-            if value != 1 {
-                // NORMAL == 1 in SQLite
-                return Err(io::Error::other(format!(
-                    "Failed to set synchronous = NORMAL, got: {}",
-                    value
-                )));
-            }
-        }
 
         Ok(Self {
             conn: Arc::new(conn),
@@ -89,7 +59,7 @@ impl AsyncKeyValueDB for SqliteDB {
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
         self.conn
-            .execute("BEGIN CONCURRENT", ())
+            .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         ensure_table(&self.conn, table).await?;
@@ -126,7 +96,7 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         self.conn
-            .execute("BEGIN CONCURRENT", ())
+            .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         if !table_exists(&self.conn, table).await? {
@@ -251,7 +221,7 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn delete_table(&self, table: &str) -> Result<(), io::Error> {
         self.conn
-            .execute("BEGIN CONCURRENT", ())
+            .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         if table_exists(&self.conn, table).await? {
@@ -270,7 +240,7 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn clear(&self) -> Result<(), io::Error> {
         self.conn
-            .execute("BEGIN CONCURRENT", ())
+            .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         let tables = self.table_names().await?; // Reuse table_names; it's read-only

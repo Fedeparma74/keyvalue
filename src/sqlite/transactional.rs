@@ -207,7 +207,7 @@ impl AsyncTransactionalKVDB for SqliteDB {
     }
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
         self.conn
-            .execute("BEGIN CONCURRENT", ())
+            .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         Ok(WriteTransaction {

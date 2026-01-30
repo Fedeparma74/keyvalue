@@ -418,6 +418,31 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "async", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_sqlite_db");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_db(&db).await;
+        common::persist_test_data_async(Box::new(db)).await;
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::check_test_data_async(&db).await;
+        assert!(
+            !keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKeyValueDB::clear(&db).await.unwrap();
+        assert!(
+            keyvalue::AsyncKeyValueDB::table_names(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
     #[tokio::test]
     async fn test_async_transactional_sqlite() {
