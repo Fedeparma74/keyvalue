@@ -30,6 +30,11 @@ pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
 
     /// Updates the value of the key in the table and increases the version by 1.
     /// If the key does not exist, it will be inserted with version 1.
+    ///
+    /// # Note
+    /// This default implementation is **not atomic**: it performs a read followed by a write.
+    /// Under concurrent access, callers must provide external synchronization or use the
+    /// transactional API to avoid lost updates (TOCTOU).
     async fn update(
         &self,
         table_name: &str,
@@ -124,7 +129,7 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
             version,
         };
 
-        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)).await?;
+        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)?).await?;
         if let Some(old_value) = old_value {
             Ok(Some(decode(&old_value)?))
         } else {
@@ -229,7 +234,7 @@ where
             version,
         };
 
-        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)).await?;
+        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)?).await?;
         if let Some(old_value) = old_value {
             Ok(Some(decode(&old_value)?))
         } else {

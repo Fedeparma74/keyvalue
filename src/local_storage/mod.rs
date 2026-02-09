@@ -4,6 +4,23 @@ use gloo_storage::{LocalStorage, Storage, errors::StorageError};
 
 use crate::KeyValueDB;
 
+/// Validates that a name does not contain `/`, which would break the `db/table/key` storage format.
+fn validate_name(kind: &str, name: &str) -> Result<(), io::Error> {
+    if name.contains('/') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{kind} must not contain '/'"),
+        ));
+    }
+    if name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{kind} must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct LocalStorageDB {
     name: String,
@@ -19,6 +36,8 @@ impl LocalStorageDB {
 
 impl KeyValueDB for LocalStorageDB {
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        validate_name("table name", table_name)?;
+        validate_name("key", key)?;
         let old_value = KeyValueDB::get(self, table_name, key)?;
 
         LocalStorage::set(format!("{}/{}/{}", self.name, table_name, key), value)
@@ -28,6 +47,8 @@ impl KeyValueDB for LocalStorageDB {
     }
 
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
+        validate_name("table name", table_name)?;
+        validate_name("key", key)?;
         match LocalStorage::get::<Vec<u8>>(&format!("{}/{}/{}", self.name, table_name, key)) {
             Ok(value) => Ok(Some(value)),
             Err(gloo_storage::errors::StorageError::KeyNotFound(_)) => Ok(None),
@@ -36,6 +57,8 @@ impl KeyValueDB for LocalStorageDB {
     }
 
     fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
+        validate_name("table name", table_name)?;
+        validate_name("key", key)?;
         if let Some(old_value) = KeyValueDB::get(self, table_name, key)? {
             LocalStorage::delete(format!("{}/{}/{}", self.name, table_name, key));
 
@@ -46,6 +69,7 @@ impl KeyValueDB for LocalStorageDB {
     }
 
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
+        validate_name("table name", table_name)?;
         let prefix = format!("{}/{}/", self.name, table_name);
 
         let local_storage = LocalStorage::raw();
@@ -94,11 +118,14 @@ impl KeyValueDB for LocalStorageDB {
             }
         }
 
-        Ok(table_names.into_iter().collect())
+        let mut result: Vec<String> = table_names.into_iter().collect();
+        result.sort();
+        Ok(result)
     }
 
     fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        let prefix = format!("{}/{}", self.name, table_name);
+        validate_name("table name", table_name)?;
+        let prefix = format!("{}/{}/", self.name, table_name);
 
         let local_storage = LocalStorage::raw();
         let length = LocalStorage::length();
@@ -124,7 +151,28 @@ impl KeyValueDB for LocalStorageDB {
     }
 
     fn clear(&self) -> io::Result<()> {
-        LocalStorage::clear();
+        // Only delete keys belonging to this database, not all of localStorage
+        let prefix = format!("{}/", self.name);
+
+        let local_storage = LocalStorage::raw();
+        let length = LocalStorage::length();
+
+        let mut keys_to_delete = Vec::new();
+        for i in 0..length {
+            let key = local_storage
+                .key(i)
+                .map_err(|e| {
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
+                })?
+                .unwrap_or_default();
+            if key.starts_with(&prefix) {
+                keys_to_delete.push(key);
+            }
+        }
+
+        for key in keys_to_delete {
+            LocalStorage::delete(key);
+        }
 
         Ok(())
     }

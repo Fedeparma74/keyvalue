@@ -219,7 +219,7 @@ where
         };
 
         let old_value =
-            AsyncKVWriteTransaction::insert(self, table_name, key, &encode(&obj)).await?;
+            AsyncKVWriteTransaction::insert(self, table_name, key, &encode(&obj)?).await?;
         if let Some(old_value) = old_value {
             Ok(Some(decode(&old_value)?))
         } else {

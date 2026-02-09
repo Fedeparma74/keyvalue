@@ -62,6 +62,9 @@ impl RocksDB {
 }
 
 impl KeyValueDB for RocksDB {
+    /// Note: the get-then-put pattern is not atomic. Under concurrent access,
+    /// the returned "old value" may be stale. Use the transactional API
+    /// (`TransactionalKVDB`) for atomic read-modify-write operations.
     fn insert(&self, table: &str, key: &str, value: &[u8]) -> Result<Option<Vec<u8>>, io::Error> {
         if table == DEFAULT_CF {
             return Err(io::Error::new(
@@ -74,11 +77,17 @@ impl KeyValueDB for RocksDB {
 
         let mut batch = WriteBatch::default();
 
-        // Create cf if not exists
+        // Create cf if not exists (race-safe: retry handle on create failure)
         let cf = if let Some(cf) = db.cf_handle(table) {
             cf
         } else {
-            db.create_cf(table, &self.opts).map_err(io::Error::other)?;
+            match db.create_cf(table, &self.opts) {
+                Ok(()) => {}
+                Err(_) if db.cf_handle(table).is_some() => {
+                    // Another thread created it concurrently — that's fine
+                }
+                Err(e) => return Err(io::Error::other(e)),
+            }
             db.cf_handle(table).ok_or(io::Error::other(
                 "Failed to get column family after creation",
             ))?
@@ -118,6 +127,9 @@ impl KeyValueDB for RocksDB {
             .transpose()
     }
 
+    /// Note: the get-then-delete pattern is not atomic. Under concurrent access,
+    /// the returned "old value" may be stale. Use the transactional API
+    /// (`TransactionalKVDB`) for atomic read-modify-write operations.
     fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == DEFAULT_CF {
             return Err(io::Error::new(
@@ -139,7 +151,9 @@ impl KeyValueDB for RocksDB {
             .map_err(io::Error::other)?
             .map(|v| v.to_vec());
 
-        db.delete_cf(&cf, key_bytes).map_err(io::Error::other)?;
+        if old.is_some() {
+            db.delete_cf(&cf, key_bytes).map_err(io::Error::other)?;
+        }
         Ok(old)
     }
 

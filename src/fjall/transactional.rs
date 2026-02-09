@@ -8,10 +8,15 @@ use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
 use super::{FjallDB, META_DELETED_KEYSPACE};
 
+fn lock_poisoned() -> io::Error {
+    io::Error::other("RwLock poisoned")
+}
+
 pub struct ReadTransaction {
     snapshot: Snapshot,
     db: SingleWriterTxDatabase,
-    deleted_tables: Arc<RwLock<HashSet<String>>>,
+    /// Snapshot of deleted tables taken at begin_read() time for isolation.
+    deleted_tables: HashSet<String>,
 }
 
 pub struct WriteTransaction {
@@ -28,11 +33,8 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             return Ok(None);
         }
 
-        {
-            let guard = self.deleted_tables.read().unwrap();
-            if guard.contains(table) {
-                return Ok(None);
-            }
+        if self.deleted_tables.contains(table) {
+            return Ok(None);
         }
 
         if !self.db.keyspace_exists(table) {
@@ -56,11 +58,8 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             return Ok(Vec::new());
         }
 
-        {
-            let guard = self.deleted_tables.read().unwrap();
-            if guard.contains(table) {
-                return Ok(Vec::new());
-            }
+        if self.deleted_tables.contains(table) {
+            return Ok(Vec::new());
         }
 
         if !self.db.keyspace_exists(table) {
@@ -89,10 +88,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
-        {
-            let guard = self.deleted_tables.read().unwrap();
-            names.retain(|n| n != META_DELETED_KEYSPACE && !guard.contains(n));
-        }
+        names.retain(|n| n != META_DELETED_KEYSPACE && !self.deleted_tables.contains(n));
 
         Ok(names)
     }
@@ -106,11 +102,8 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             return Ok(Vec::new());
         }
 
-        {
-            let guard = self.deleted_tables.read().unwrap();
-            if guard.contains(table) {
-                return Ok(Vec::new());
-            }
+        if self.deleted_tables.contains(table) {
+            return Ok(Vec::new());
         }
 
         if !self.db.keyspace_exists(table) {
@@ -152,7 +145,10 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
 
         // Check global persistent deletion
         {
-            let guard = self.global_deleted_tables.read().unwrap();
+            let guard = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?;
             if guard.contains(table) {
                 return Ok(None);
             }
@@ -188,7 +184,10 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
 
         // Global persistent deletion
         {
-            let guard = self.global_deleted_tables.read().unwrap();
+            let guard = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?;
             if guard.contains(table) {
                 return Ok(Vec::new());
             }
@@ -227,16 +226,19 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
 
         // Exclude global persistent deletions
         {
-            let guard = self.global_deleted_tables.read().unwrap();
+            let guard = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?;
             names.retain(|n| n != META_DELETED_KEYSPACE && !guard.contains(n));
         }
 
         // Exclude local transaction deletions
         names.retain(|n| n != META_DELETED_KEYSPACE && !self.tx_deleted_tables.contains(n));
 
-        // Add pending new tables (not yet committed)
-        for table in self.pending.keys() {
-            if !names.contains(table) {
+        // Add pending new tables (not yet committed), but only if they have at least one insert
+        for (table, map) in &self.pending {
+            if !names.contains(table) && map.values().any(|v| v.is_some()) {
                 names.push(table.clone());
             }
         }
@@ -333,34 +335,42 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
 
         let mut tx = self.db.write_tx();
 
+        // Collect state changes to apply after successful commit
+        let mut tables_to_undelete = Vec::new();
+        let mut tables_to_delete = Vec::new();
+
         // Apply pending inserts/removes
-        for (table, map) in self.pending {
+        for (table, map) in &self.pending {
             let ks = self
                 .db
-                .keyspace(&table, KeyspaceCreateOptions::default)
+                .keyspace(table, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
             for (key_str, v_opt) in map {
                 let key_bytes = key_str.as_bytes();
                 match v_opt {
-                    Some(v) => tx.insert(&ks, key_bytes, &v),
+                    Some(v) => tx.insert(&ks, key_bytes, v.as_slice()),
                     None => tx.remove(&ks, key_bytes),
                 }
             }
 
             // remove table from deleted meta if it was previously deleted (undelete)
-            let was_deleted = self.global_deleted_tables.read().unwrap().contains(&table);
+            let was_deleted = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?
+                .contains(table);
             if was_deleted {
                 tx.remove(&meta_deleted_keyspace, table.as_bytes());
-                self.global_deleted_tables.write().unwrap().remove(&table);
+                tables_to_undelete.push(table.clone());
             }
         }
 
         // Apply deletions (clear keyspaces marked deleted in this tx)
-        for table in self.tx_deleted_tables {
+        for table in &self.tx_deleted_tables {
             let ks = self
                 .db
-                .keyspace(&table, KeyspaceCreateOptions::default)
+                .keyspace(table, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
             for item in tx.iter(&ks) {
@@ -370,12 +380,24 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
 
             // Mark as deleted in persistent meta
             tx.insert(&meta_deleted_keyspace, table.as_bytes(), []);
-
-            // Update global deleted tables set
-            self.global_deleted_tables.write().unwrap().insert(table);
+            tables_to_delete.push(table.clone());
         }
 
         tx.commit().map_err(io::Error::other)?;
+
+        // Apply in-memory state changes AFTER successful commit
+        {
+            let mut guard = self
+                .global_deleted_tables
+                .write()
+                .map_err(|_| lock_poisoned())?;
+            for table in tables_to_undelete {
+                guard.remove(&table);
+            }
+            for table in tables_to_delete {
+                guard.insert(table);
+            }
+        }
 
         Ok(())
     }
@@ -390,10 +412,17 @@ impl TransactionalKVDB for FjallDB {
     type WriteTransaction<'a> = WriteTransaction;
 
     fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+        // Clone the deleted_tables set to provide snapshot isolation.
+        // This ensures concurrent writes don't affect this read transaction.
+        let deleted_snapshot = self
+            .deleted_tables
+            .read()
+            .map_err(|_| lock_poisoned())?
+            .clone();
         Ok(ReadTransaction {
             snapshot: self.inner.read_tx(),
             db: self.inner.clone(),
-            deleted_tables: self.deleted_tables.clone(),
+            deleted_tables: deleted_snapshot,
         })
     }
 

@@ -39,6 +39,10 @@ impl TimeSource for TimeSourceImpl {
 #[cfg(target_arch = "wasm32")]
 struct SendTimeoutFuture(gloo_timers::future::TimeoutFuture);
 
+// SAFETY: On wasm32, there is no true multi-threading. `gloo_timers::future::TimeoutFuture`
+// is `!Send` only because the JS API it wraps is not `Send`, but on single-threaded wasm
+// this is safe because there is only one thread of execution. The AWS SDK requires `Send`
+// bounds even on wasm targets.
 #[cfg(target_arch = "wasm32")]
 unsafe impl Send for SendTimeoutFuture {}
 #[cfg(target_arch = "wasm32")]
@@ -77,23 +81,40 @@ trait MakeRequest {
 
 pub struct ReqwestHttpClient;
 
+/// Shared reqwest client – avoids creating a new client (and connection pool) per request.
+fn shared_reqwest_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 impl MakeRequest for ReqwestHttpClient {
     async fn send(req: Request) -> Result<Response<SdkBody>, reqwest::Error> {
-        let client = reqwest::Client::new();
+        let client = shared_reqwest_client();
 
         let mut headers_map = reqwest::header::HeaderMap::new();
 
         let headers = req.headers().clone();
-        let body = req.body().bytes().unwrap().to_vec();
+        let body = req.body().bytes().unwrap_or_default().to_vec();
 
         for (name, value) in headers.iter() {
             let name = name.to_string();
             let value = value.to_string();
-            headers_map.insert(HeaderName::from_str(&name).unwrap(), value.parse().unwrap());
+            let Ok(header_name) = HeaderName::from_str(&name) else {
+                continue;
+            };
+            let Ok(header_value) = value.parse() else {
+                continue;
+            };
+            headers_map.insert(header_name, header_value);
         }
 
+        let method = req
+            .method()
+            .parse()
+            .expect("HTTP method from SDK request must be valid");
         let res = client
-            .request(req.method().parse().unwrap(), req.uri())
+            .request(method, req.uri())
             .headers(headers_map)
             .body(body)
             .send()
@@ -105,9 +126,10 @@ impl MakeRequest for ReqwestHttpClient {
 
         let mut response_headers = Headers::new();
         for (name, value) in headers {
-            if let Some(name) = name {
-                let value = value.to_str().unwrap().to_string();
-                response_headers.insert(name.to_string(), value);
+            if let Some(name) = name
+                && let Ok(value) = value.to_str()
+            {
+                response_headers.insert(name.to_string(), value.to_string());
             }
         }
 
@@ -125,19 +147,20 @@ impl HttpConnector for HttpClientImpl {
     fn call(&self, req: HttpRequest) -> HttpConnectorFuture {
         #[cfg(not(target_arch = "wasm32"))]
         let response_fut = ReqwestHttpClient::send(req);
-        #[cfg(target_arch = "wasm32")]
-        let response_fut = async {
-            let (tx, rx) = futures::channel::oneshot::channel();
-
-            wasm_bindgen_futures::spawn_local(async move {
-                let res = ReqwestHttpClient::send(req).await;
-                tx.send(res).expect("sent request to channel");
-            });
-
-            rx.await.unwrap()
-        };
 
         HttpConnectorFuture::new(async move {
+            #[cfg(target_arch = "wasm32")]
+            let response_fut = async {
+                let (tx, rx) = futures::channel::oneshot::channel();
+
+                wasm_bindgen_futures::spawn_local(async move {
+                    let res = ReqwestHttpClient::send(req).await;
+                    tx.send(res).expect("sent request to channel");
+                });
+
+                rx.await.expect("received response from channel")
+            };
+
             let response = response_fut
                 .await
                 .map_err(|e| ConnectorError::user(Box::new(e)))?;

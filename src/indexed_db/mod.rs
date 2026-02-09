@@ -166,7 +166,11 @@ impl AsyncKeyValueDB for IndexedDB {
                     db.close();
 
                     let table_name_str = table_name.to_string();
-                    let new_version = version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let current = version.load(std::sync::atomic::Ordering::SeqCst);
+                    let new_version = current.checked_add(1).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
+                    })?;
+                    version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     *db = Factory::get()
                         .map_err(indexed_db_error_to_io_error)?
@@ -293,8 +297,11 @@ impl AsyncKeyValueDB for IndexedDB {
                         db.close();
 
                         let table_name_str = table_name.to_string();
-                        let new_version =
-                            version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        let current = version.load(std::sync::atomic::Ordering::SeqCst);
+                        let new_version = current.checked_add(1).ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
+                        })?;
+                        version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                         *db = Factory::get()
                             .map_err(indexed_db_error_to_io_error)?
@@ -454,7 +461,11 @@ impl AsyncKeyValueDB for IndexedDB {
                     db.close();
 
                     let table_name_str = table_name.to_string();
-                    let new_version = version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let current = version.load(std::sync::atomic::Ordering::SeqCst);
+                    let new_version = current.checked_add(1).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
+                    })?;
+                    version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     *db = Factory::get()
                         .map_err(indexed_db_error_to_io_error)?

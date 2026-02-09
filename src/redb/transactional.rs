@@ -79,7 +79,8 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
 
 impl<'a> KVReadTransaction<'a> for WriteTransaction {
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        // check if the table exists
+        // WriteTransaction::open_table creates the table if it doesn't exist,
+        // so we must check first to avoid side effects on read operations.
         if !self.contains_table(table_name)? {
             return Ok(None);
         }
@@ -103,7 +104,8 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
     }
 
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-        // check if the table exists
+        // WriteTransaction::open_table creates the table if it doesn't exist,
+        // so we must check first to avoid side effects on read operations.
         if !self.contains_table(table_name)? {
             return Ok(Vec::new());
         }
@@ -192,13 +194,14 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     }
 
     fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
-        redb::WriteTransaction::delete_table(
+        match redb::WriteTransaction::delete_table(
             &self.tx,
             TableDefinition::<&str, &[u8]>::new(table_name),
-        )
-        .map_err(table_error_to_io_error)?;
-
-        Ok(())
+        ) {
+            Ok(_) => Ok(()),
+            Err(TableError::TableDoesNotExist(_)) => Ok(()),
+            Err(e) => Err(table_error_to_io_error(e)),
+        }
     }
 }
 

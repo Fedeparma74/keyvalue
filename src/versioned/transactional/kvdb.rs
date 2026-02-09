@@ -203,7 +203,7 @@ where
             version,
         };
 
-        let old_value = KVWriteTransaction::insert(self, table_name, key, &encode(&obj))?;
+        let old_value = KVWriteTransaction::insert(self, table_name, key, &encode(&obj)?)?;
         if let Some(old_value) = old_value {
             Ok(Some(decode(&old_value)?))
         } else {

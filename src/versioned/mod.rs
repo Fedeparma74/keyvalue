@@ -1,4 +1,6 @@
-use std::io;
+use crate::io;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 #[cfg(feature = "async")]
 mod async_kvdb;
@@ -20,7 +22,7 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use transactional::*;
 
-pub fn encode(obj: &VersionedObject) -> Vec<u8> {
+pub fn encode(obj: &VersionedObject) -> Result<Vec<u8>, io::Error> {
     let value_len = obj.value.as_ref().map(|v| v.len()).unwrap_or(0);
 
     let mut buf = Vec::with_capacity(
@@ -38,14 +40,20 @@ pub fn encode(obj: &VersionedObject) -> Vec<u8> {
             buf.extend_from_slice(&obj.version.to_le_bytes());
         }
         Some(v) => {
+            let len: u32 = v.len().try_into().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "value too large to encode (exceeds u32::MAX)",
+                )
+            })?;
             buf.push(1);
             buf.extend_from_slice(&obj.version.to_le_bytes());
-            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(v);
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 pub fn decode(bytes: &[u8]) -> io::Result<VersionedObject> {
@@ -70,7 +78,15 @@ pub fn decode(bytes: &[u8]) -> io::Result<VersionedObject> {
     cursor = &cursor[8..];
 
     let value = match value_tag {
-        0 => None,
+        0 => {
+            if !cursor.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "trailing bytes after versioned object (None variant)",
+                ));
+            }
+            None
+        }
         1 => {
             if cursor.len() < 4 {
                 return Err(io::Error::new(
@@ -93,7 +109,17 @@ pub fn decode(bytes: &[u8]) -> io::Result<VersionedObject> {
                 ));
             }
 
-            Some(cursor[..len].to_vec())
+            let val = cursor[..len].to_vec();
+            cursor = &cursor[len..];
+
+            if !cursor.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "trailing bytes after versioned object (Some variant)",
+                ));
+            }
+
+            Some(val)
         }
         _ => {
             return Err(io::Error::new(
@@ -113,7 +139,7 @@ fn roundtrip_some() {
         value: Some(b"hello".to_vec()),
     };
 
-    let encoded = encode(&obj);
+    let encoded = encode(&obj).unwrap();
     let decoded = decode(&encoded).unwrap();
 
     assert_eq!(obj, decoded);
@@ -126,7 +152,7 @@ fn roundtrip_none() {
         value: None,
     };
 
-    let encoded = encode(&obj);
+    let encoded = encode(&obj).unwrap();
     let decoded = decode(&encoded).unwrap();
 
     assert_eq!(obj, decoded);
@@ -135,4 +161,15 @@ fn roundtrip_none() {
 #[test]
 fn reject_garbage() {
     assert!(decode(&[1, 2, 3]).is_err());
+}
+
+#[test]
+fn reject_trailing_bytes() {
+    let obj = VersionedObject {
+        version: 1,
+        value: Some(b"hi".to_vec()),
+    };
+    let mut encoded = encode(&obj).unwrap();
+    encoded.push(0xFF);
+    assert!(decode(&encoded).is_err());
 }

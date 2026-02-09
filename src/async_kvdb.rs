@@ -52,7 +52,7 @@ pub trait AsyncKeyValueDB: MaybeSendSync + 'static {
         Ok(values)
     }
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        for (key, _) in self.iter(table_name).await? {
+        for key in self.keys(table_name).await? {
             self.remove(table_name, &key).await?;
         }
         Ok(())

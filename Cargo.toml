@@ -31,7 +31,7 @@ reqwest = { version = "0.13", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redb = { version = "3", optional = true }
 fjall = { version = "3", optional = true }
-rust-rocksdb = { version = "0.45", optional = true }
+rust-rocksdb = { version = "0.46", optional = true }
 turso = { version = "0.4", default-features = false, optional = true }
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
@@ -45,7 +45,7 @@ gloo-storage = { version = "0.3", optional = true }
 indexed-db = { version = "0.5.0-alpha", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = "0.1"
-getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 web-time = { version = "1", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }

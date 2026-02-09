@@ -9,6 +9,10 @@ use fjall::{KeyspaceCreateOptions, Readable, SingleWriterTxDatabase};
 
 use crate::KeyValueDB;
 
+fn lock_poisoned() -> io::Error {
+    io::Error::other("RwLock poisoned")
+}
+
 #[cfg(feature = "transactional")]
 mod transactional;
 
@@ -41,7 +45,7 @@ impl FjallDB {
                 let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
                 let table_name = String::from_utf8(key_bytes.to_vec())
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let mut deleted_tables = deleted.write().unwrap();
+                let mut deleted_tables = deleted.write().map_err(|_| lock_poisoned())?;
                 deleted_tables.insert(table_name);
             }
         }
@@ -68,17 +72,12 @@ impl KeyValueDB for FjallDB {
 
         // Check if this table was previously deleted
         let was_deleted = {
-            let guard = self.deleted_tables.read().unwrap();
+            let guard = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             guard.contains(&table_str)
         };
 
         if was_deleted {
             // "Recreate" the table: remove from deleted list (both memory and persistent meta)
-            {
-                let mut guard = self.deleted_tables.write().unwrap();
-                guard.remove(&table_str);
-            }
-
             // Remove the deletion marker from _meta_deleted
             let meta_ks = self
                 .inner
@@ -102,6 +101,12 @@ impl KeyValueDB for FjallDB {
         write_tx.insert(&ks, key_bytes, value);
         write_tx.commit().map_err(io::Error::other)?;
 
+        // Update in-memory state AFTER successful commit
+        if was_deleted {
+            let mut guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
+            guard.remove(&table_str);
+        }
+
         Ok(old)
     }
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
@@ -110,7 +115,7 @@ impl KeyValueDB for FjallDB {
         }
 
         {
-            let deleted_tables = self.deleted_tables.read().unwrap();
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             if deleted_tables.contains(table) {
                 return Ok(None);
             }
@@ -137,7 +142,7 @@ impl KeyValueDB for FjallDB {
         }
 
         {
-            let deleted_tables = self.deleted_tables.read().unwrap();
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             if deleted_tables.contains(table) {
                 return Ok(None);
             }
@@ -171,7 +176,7 @@ impl KeyValueDB for FjallDB {
         }
 
         {
-            let deleted_tables = self.deleted_tables.read().unwrap();
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             if deleted_tables.contains(table) {
                 return Ok(Vec::new());
             }
@@ -198,7 +203,7 @@ impl KeyValueDB for FjallDB {
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
         // Exclude internal meta and deleted tables
-        let deleted_tables = self.deleted_tables.read().unwrap();
+        let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
         let names = self
             .inner
             .list_keyspace_names()
@@ -225,7 +230,7 @@ impl KeyValueDB for FjallDB {
         }
 
         {
-            let deleted_tables = self.deleted_tables.read().unwrap();
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             if deleted_tables.contains(table) {
                 return Ok(Vec::new());
             }
@@ -255,7 +260,7 @@ impl KeyValueDB for FjallDB {
             return Ok(false);
         }
 
-        let deleted_tables = self.deleted_tables.read().unwrap();
+        let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
         if deleted_tables.contains(table) {
             return Ok(false);
         }
@@ -272,7 +277,7 @@ impl KeyValueDB for FjallDB {
 
         // Skip if already deleted
         {
-            let deleted_tables = self.deleted_tables.read().unwrap();
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             if deleted_tables.contains(table) {
                 return Ok(());
             }
@@ -305,7 +310,7 @@ impl KeyValueDB for FjallDB {
 
         // Update global deleted tables set
         {
-            let mut guard = self.deleted_tables.write().unwrap();
+            let mut guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
             guard.insert(table.to_string());
         }
 
@@ -315,7 +320,7 @@ impl KeyValueDB for FjallDB {
     fn clear(&self) -> Result<(), io::Error> {
         // Exclude internal meta and deleted tables
         let current_tables = {
-            let deleted_tables = self.deleted_tables.read().unwrap();
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
             self.inner
                 .list_keyspace_names()
                 .iter()
@@ -336,7 +341,7 @@ impl KeyValueDB for FjallDB {
 
         let mut write_tx = self.inner.write_tx();
 
-        for table_name in current_tables {
+        for table_name in &current_tables {
             if table_name == META_DELETED_KEYSPACE {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -346,7 +351,7 @@ impl KeyValueDB for FjallDB {
 
             let ks = self
                 .inner
-                .keyspace(&table_name, KeyspaceCreateOptions::default)
+                .keyspace(table_name, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
             for item in write_tx.iter(&ks) {
@@ -355,15 +360,17 @@ impl KeyValueDB for FjallDB {
             }
 
             write_tx.insert(&meta_ks, table_name.as_bytes(), []);
-
-            // Update global deleted tables set
-            {
-                let mut guard = self.deleted_tables.write().unwrap();
-                guard.insert(table_name.to_string());
-            }
         }
 
         write_tx.commit().map_err(io::Error::other)?;
+
+        // Update global deleted tables set AFTER successful commit
+        {
+            let mut guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
+            for table_name in current_tables {
+                guard.insert(table_name);
+            }
+        }
 
         Ok(())
     }

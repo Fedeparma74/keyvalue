@@ -169,9 +169,11 @@ impl KeyValueDB for RedbDB {
             .set_durability(Durability::Immediate)
             .map_err(io::Error::other)?;
         write_transaction.set_quick_repair(true);
-        write_transaction
-            .delete_table(TableDefinition::<&str, &[u8]>::new(table_name))
-            .map_err(table_error_to_io_error)?;
+        match write_transaction.delete_table(TableDefinition::<&str, &[u8]>::new(table_name)) {
+            Ok(_) => {}
+            Err(TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => return Err(table_error_to_io_error(e)),
+        }
         write_transaction
             .commit()
             .map_err(commit_error_to_io_error)?;

@@ -193,9 +193,9 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
         // Exclude local transaction deletions
         names.retain(|n| !self.tx_deleted_tables.contains(n));
 
-        // Add pending new tables (not yet committed)
-        for table in self.pending.keys() {
-            if !names.contains(table) {
+        // Add pending new tables (not yet committed), but only if they have at least one insert
+        for (table, map) in &self.pending {
+            if !names.contains(table) && map.values().any(|v| v.is_some()) {
                 names.push(table.clone());
             }
         }

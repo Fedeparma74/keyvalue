@@ -63,15 +63,36 @@ impl AwsS3DB {
     }
 }
 
+/// Validates that a name does not contain `/`, which would break the `table/key` S3 key format.
+fn validate_name(kind: &str, name: &str) -> Result<(), io::Error> {
+    if name.contains('/') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{kind} must not contain '/'"),
+        ));
+    }
+    if name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{kind} must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl AsyncKeyValueDB for AwsS3DB {
+    /// Note: the get-then-put pattern is not atomic. Under concurrent access,
+    /// the returned "old value" may be stale due to inherent S3 eventual consistency.
     async fn insert(
         &self,
         table_name: &str,
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
+        validate_name("table name", table_name)?;
+        validate_name("key", key)?;
         let old_value = self.get(table_name, key).await?;
 
         let table_key = format!("{}/{}", table_name, key);
@@ -89,6 +110,8 @@ impl AsyncKeyValueDB for AwsS3DB {
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        validate_name("table name", table_name)?;
+        validate_name("key", key)?;
         let table_key = format!("{}/{}", table_name, key);
 
         let output = match self
@@ -114,23 +137,30 @@ impl AsyncKeyValueDB for AwsS3DB {
         Ok(Some(data.to_vec()))
     }
 
+    /// Note: the get-then-delete pattern is not atomic. Under concurrent access,
+    /// the returned "old value" may be stale due to inherent S3 eventual consistency.
     async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        validate_name("table name", table_name)?;
+        validate_name("key", key)?;
         let old_value = self.get(table_name, key).await?;
 
-        let table_key = format!("{}/{}", table_name, key);
+        if old_value.is_some() {
+            let table_key = format!("{}/{}", table_name, key);
 
-        self.client
-            .delete_object()
-            .bucket(&self.bucket_name)
-            .key(&table_key)
-            .send()
-            .await
-            .map_err(|e| io::Error::other(format!("{:?}", e)))?;
+            self.client
+                .delete_object()
+                .bucket(&self.bucket_name)
+                .key(&table_key)
+                .send()
+                .await
+                .map_err(|e| io::Error::other(format!("{:?}", e)))?;
+        }
 
         Ok(old_value)
     }
 
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        validate_name("table name", table_name)?;
         let prefix = format!("{}/", table_name);
 
         let mut keys_and_values = Vec::new();
@@ -216,6 +246,8 @@ impl AsyncKeyValueDB for AwsS3DB {
             }
         }
 
-        Ok(table_names.into_iter().collect())
+        let mut result: Vec<String> = table_names.into_iter().collect();
+        result.sort();
+        Ok(result)
     }
 }

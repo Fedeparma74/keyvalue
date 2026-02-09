@@ -17,6 +17,10 @@ impl InMemoryDB {
     }
 }
 
+fn lock_poisoned() -> io::Error {
+    io::Error::other("RwLock poisoned")
+}
+
 impl KeyValueDB for InMemoryDB {
     fn insert(
         &self,
@@ -27,7 +31,7 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .write()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .entry(table_name.to_owned())
             .or_default()
             .insert(key.to_owned(), value.to_owned()))
@@ -37,7 +41,7 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .read()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get(table_name)
             .and_then(|map| map.get(key))
             .cloned())
@@ -47,7 +51,7 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .write()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get_mut(table_name)
             .and_then(|map| map.remove(key)))
     }
@@ -56,7 +60,7 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .read()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get(table_name)
             .map(|map| {
                 map.iter()
@@ -67,7 +71,13 @@ impl KeyValueDB for InMemoryDB {
     }
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        Ok(self.map.read().unwrap().keys().cloned().collect())
+        Ok(self
+            .map
+            .read()
+            .map_err(|_| lock_poisoned())?
+            .keys()
+            .cloned()
+            .collect())
     }
 
     fn iter_from_prefix(
@@ -78,7 +88,7 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .read()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get(table_name)
             .map(|map| {
                 map.iter()
@@ -90,14 +100,18 @@ impl KeyValueDB for InMemoryDB {
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        Ok(self.map.read().unwrap().contains_key(table_name))
+        Ok(self
+            .map
+            .read()
+            .map_err(|_| lock_poisoned())?
+            .contains_key(table_name))
     }
 
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
         Ok(self
             .map
             .read()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get(table_name)
             .map(|map| map.contains_key(key))
             .unwrap_or_default())
@@ -107,7 +121,7 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .read()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get(table_name)
             .map(|map| map.keys().cloned().collect())
             .unwrap_or_default())
@@ -117,19 +131,22 @@ impl KeyValueDB for InMemoryDB {
         Ok(self
             .map
             .read()
-            .unwrap()
+            .map_err(|_| lock_poisoned())?
             .get(table_name)
             .map(|map| map.values().cloned().collect())
             .unwrap_or_default())
     }
 
     fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        self.map.write().unwrap().remove(table_name);
+        self.map
+            .write()
+            .map_err(|_| lock_poisoned())?
+            .remove(table_name);
         Ok(())
     }
 
     fn clear(&self) -> Result<(), io::Error> {
-        self.map.write().unwrap().clear();
+        self.map.write().map_err(|_| lock_poisoned())?.clear();
         Ok(())
     }
 }
