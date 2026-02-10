@@ -1,5 +1,5 @@
 #[cfg(feature = "async")]
-mod async_kvdb;
+pub(crate) mod async_kvdb;
 mod kvdb;
 
 #[cfg(feature = "async")]

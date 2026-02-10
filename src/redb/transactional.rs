@@ -230,3 +230,48 @@ impl TransactionalKVDB for RedbDB {
         Ok(WriteTransaction { tx })
     }
 }
+
+#[cfg(all(feature = "async", feature = "tokio"))]
+mod async_impl {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    use crate::{
+        AsyncTransactionalKVDB,
+        transactional::async_kvdb::{SpawnBlockingReadTx, SpawnBlockingWriteTx},
+    };
+
+    use super::super::RedbDB;
+    use super::{ReadTransaction, WriteTransaction};
+
+    #[async_trait]
+    impl AsyncTransactionalKVDB for RedbDB {
+        type ReadTransaction<'a> = SpawnBlockingReadTx<ReadTransaction>;
+        type WriteTransaction<'a> = SpawnBlockingWriteTx<WriteTransaction>;
+
+        async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let tx = crate::TransactionalKVDB::begin_read(&db)?;
+                Ok(SpawnBlockingReadTx {
+                    inner: Arc::new(Mutex::new(Some(tx))),
+                })
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        }
+
+        async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let tx = crate::TransactionalKVDB::begin_write(&db)?;
+                Ok(SpawnBlockingWriteTx {
+                    inner: Arc::new(Mutex::new(Some(tx))),
+                })
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        }
+    }
+}

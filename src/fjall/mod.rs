@@ -19,8 +19,12 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+#[cfg(feature = "tokio")]
+crate::impl_async_kvdb_via_spawn_blocking!(FjallDB);
+
 const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
+#[derive(Clone)]
 pub struct FjallDB {
     inner: SingleWriterTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,

@@ -4,7 +4,8 @@ use alloc::{string::String, vec::Vec};
 
 use async_trait::async_trait;
 
-use super::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
+#[cfg(feature = "tokio")]
+use super::{KVReadTransaction, KVWriteTransaction};
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
@@ -86,23 +87,77 @@ pub trait AsyncKVWriteTransaction<'a>: AsyncKVReadTransaction<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Generic spawn_blocking adapters for wrapping sync transaction types
+// ---------------------------------------------------------------------------
+
+/// Wraps a sync `KVReadTransaction` in an async-safe `Arc<Mutex<Option<T>>>` so it
+/// can be used with `tokio::task::spawn_blocking`.
+#[cfg(feature = "tokio")]
+pub struct SpawnBlockingReadTx<T: Send + 'static> {
+    pub(crate) inner: std::sync::Arc<std::sync::Mutex<Option<T>>>,
+}
+
+/// Wraps a sync `KVWriteTransaction` in an async-safe `Arc<Mutex<Option<T>>>` so it
+/// can be used with `tokio::task::spawn_blocking`.
+#[cfg(feature = "tokio")]
+pub struct SpawnBlockingWriteTx<T: Send + 'static> {
+    pub(crate) inner: std::sync::Arc<std::sync::Mutex<Option<T>>>,
+}
+
+#[cfg(feature = "tokio")]
+fn mutex_poisoned() -> io::Error {
+    io::Error::other("Mutex poisoned")
+}
+
+#[cfg(feature = "tokio")]
+fn tx_consumed() -> io::Error {
+    io::Error::other("Transaction already consumed")
+}
+
+// -- AsyncKVReadTransaction for SpawnBlockingReadTx<T> --
+
 #[cfg(feature = "tokio")]
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl<'a, T> AsyncKVReadTransaction<'a> for T
+impl<'a, T> AsyncKVReadTransaction<'a> for SpawnBlockingReadTx<T>
 where
-    T: KVReadTransaction<'a>,
+    T: KVReadTransaction<'a> + Send + 'static,
 {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::get(self, table_name, key))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::get(tx, &table_name, &key)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::iter(self, table_name))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::iter(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::table_names(self))
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::table_names(tx)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn iter_from_prefix(
@@ -110,34 +165,188 @@ where
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        tokio::task::block_in_place(|| {
-            KVReadTransaction::iter_from_prefix(self, table_name, prefix)
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let prefix = prefix.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::iter_from_prefix(tx, &table_name, &prefix)
         })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::contains_table(self, table_name))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::contains_table(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::contains_key(self, table_name, key))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::contains_key(tx, &table_name, &key)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::keys(self, table_name))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::keys(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        tokio::task::block_in_place(|| KVReadTransaction::values(self, table_name))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::values(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 }
+
+// -- AsyncKVReadTransaction for SpawnBlockingWriteTx<T> (read part of write tx) --
 
 #[cfg(feature = "tokio")]
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl<'a, T> AsyncKVWriteTransaction<'a> for T
+impl<'a, T> AsyncKVReadTransaction<'a> for SpawnBlockingWriteTx<T>
 where
-    T: KVWriteTransaction<'a>,
+    T: KVWriteTransaction<'a> + Send + 'static,
+{
+    async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::get(tx, &table_name, &key)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::iter(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::table_names(tx)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn iter_from_prefix(
+        &self,
+        table_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let prefix = prefix.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::iter_from_prefix(tx, &table_name, &prefix)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::contains_table(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::contains_key(tx, &table_name, &key)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::keys(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::values(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+}
+
+// -- AsyncKVWriteTransaction for SpawnBlockingWriteTx<T> --
+
+#[cfg(feature = "tokio")]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+impl<'a, T> AsyncKVWriteTransaction<'a> for SpawnBlockingWriteTx<T>
+where
+    T: KVWriteTransaction<'a> + Send + 'static,
 {
     async fn insert(
         &mut self,
@@ -145,42 +354,72 @@ where
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        tokio::task::block_in_place(|| KVWriteTransaction::insert(self, table_name, key, value))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        let value = value.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_mut().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::insert(tx, &table_name, &key, &value)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn remove(&mut self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        tokio::task::block_in_place(|| KVWriteTransaction::remove(self, table_name, key))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_mut().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::remove(tx, &table_name, &key)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
-        tokio::task::block_in_place(|| KVWriteTransaction::delete_table(self, table_name))
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_mut().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::delete_table(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn clear(&mut self) -> Result<(), io::Error> {
-        tokio::task::block_in_place(|| KVWriteTransaction::clear(self))
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_mut().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::clear(tx)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn commit(self) -> Result<(), io::Error> {
-        tokio::task::block_in_place(|| KVWriteTransaction::commit(self))
+        tokio::task::spawn_blocking(move || {
+            let mut guard = self.inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.take().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::commit(tx)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     async fn abort(self) -> Result<(), io::Error> {
-        tokio::task::block_in_place(|| KVWriteTransaction::abort(self))
-    }
-}
-
-#[cfg(feature = "tokio")]
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl<T: TransactionalKVDB> AsyncTransactionalKVDB for T {
-    type ReadTransaction<'a> = T::ReadTransaction<'a>;
-    type WriteTransaction<'a> = T::WriteTransaction<'a>;
-
-    async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
-        tokio::task::block_in_place(|| TransactionalKVDB::begin_read(self))
-    }
-
-    async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
-        tokio::task::block_in_place(|| TransactionalKVDB::begin_write(self))
+        tokio::task::spawn_blocking(move || {
+            let mut guard = self.inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.take().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::abort(tx)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 }

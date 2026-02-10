@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use rust_rocksdb::{Direction, IteratorMode, Options, SnapshotWithThreadMode, WriteBatch};
@@ -8,25 +9,58 @@ use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
 use super::{DEFAULT_CF, Rocks, RocksDB};
 
-type Snapshot<'a> = SnapshotWithThreadMode<'a, Rocks>;
+// ---------------------------------------------------------------------------
+// Owned snapshot helper
+// ---------------------------------------------------------------------------
+// `SnapshotWithThreadMode<'a, Rocks>` borrows from the DB. We co-locate
+// it with the `Arc<Rocks>` that owns the DB so the snapshot is always valid.
+// `ManuallyDrop` + a custom `Drop` ensure the snapshot is released before
+// the `Arc` refcount is decremented.
 
-pub struct ReadTransaction<'a> {
+fn new_owned_snapshot(db: &Arc<Rocks>) -> ManuallyDrop<SnapshotWithThreadMode<'static, Rocks>> {
+    let snapshot = SnapshotWithThreadMode::new(db.as_ref());
+    // SAFETY: The snapshot internally stores a raw pointer obtained from
+    // the DB.  We hold an `Arc<Rocks>` in the same struct, guaranteeing
+    // the DB outlives the snapshot (enforced by our `Drop` impl).
+    let snapshot: SnapshotWithThreadMode<'static, Rocks> = unsafe { std::mem::transmute(snapshot) };
+    ManuallyDrop::new(snapshot)
+}
+
+// ---------------------------------------------------------------------------
+// Transaction types (owned – no lifetime parameter)
+// ---------------------------------------------------------------------------
+
+pub struct ReadTransaction {
     db: Arc<Rocks>,
-    snapshot: Snapshot<'a>,
+    snapshot: ManuallyDrop<SnapshotWithThreadMode<'static, Rocks>>,
     path: String,
     opts: Arc<Options>,
 }
 
-pub struct WriteTransaction<'a> {
+impl Drop for ReadTransaction {
+    fn drop(&mut self) {
+        // SAFETY: drop the snapshot while the Arc<Rocks> is still alive.
+        unsafe { ManuallyDrop::drop(&mut self.snapshot) };
+    }
+}
+
+pub struct WriteTransaction {
     db: Arc<Rocks>,
-    snapshot: Snapshot<'a>,
-    pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>, // For RYOW
-    tx_deleted_tables: HashSet<String>,                         // Local to this transaction
+    snapshot: ManuallyDrop<SnapshotWithThreadMode<'static, Rocks>>,
+    pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>,
+    tx_deleted_tables: HashSet<String>,
     path: String,
     opts: Arc<Options>,
 }
 
-impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
+impl Drop for WriteTransaction {
+    fn drop(&mut self) {
+        // SAFETY: drop the snapshot while the Arc<Rocks> is still alive.
+        unsafe { ManuallyDrop::drop(&mut self.snapshot) };
+    }
+}
+
+impl<'a> KVReadTransaction<'a> for ReadTransaction {
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == DEFAULT_CF {
             return Err(io::Error::new(
@@ -116,7 +150,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction<'a> {
     }
 }
 
-impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
+impl<'a> KVReadTransaction<'a> for WriteTransaction {
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         if table == DEFAULT_CF {
             return Err(io::Error::new(
@@ -257,7 +291,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction<'a> {
     }
 }
 
-impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
+impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     fn insert(
         &mut self,
         table: &str,
@@ -336,7 +370,7 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
         Ok(())
     }
 
-    fn commit(self) -> Result<(), io::Error> {
+    fn commit(mut self) -> Result<(), io::Error> {
         let db = &*self.db;
         let mut batch = WriteBatch::default();
 
@@ -362,7 +396,8 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
         db.write(&batch).map_err(io::Error::other)?;
 
         // Apply deletions by dropping CFs
-        for table in self.tx_deleted_tables {
+        let deleted = std::mem::take(&mut self.tx_deleted_tables);
+        for table in deleted {
             if db.cf_handle(&table).is_some() {
                 db.drop_cf(&table).map_err(io::Error::other)?;
             }
@@ -377,27 +412,75 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction<'a> {
 }
 
 impl TransactionalKVDB for RocksDB {
-    type ReadTransaction<'a> = ReadTransaction<'a>;
-    type WriteTransaction<'a> = WriteTransaction<'a>;
+    type ReadTransaction<'a> = ReadTransaction;
+    type WriteTransaction<'a> = WriteTransaction;
 
     fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
-        // Note: Snapshot lifetime is 'static as it's bound to the DB
+        let db = self.inner.clone();
+        let snapshot = new_owned_snapshot(&db);
         Ok(ReadTransaction {
-            db: self.inner.clone(),
-            snapshot: Snapshot::new(&self.inner),
+            db,
+            snapshot,
             path: self.path.clone(),
             opts: self.opts.clone(),
         })
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+        let db = self.inner.clone();
+        let snapshot = new_owned_snapshot(&db);
         Ok(WriteTransaction {
-            db: self.inner.clone(),
-            snapshot: Snapshot::new(&self.inner),
+            db,
+            snapshot,
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
             path: self.path.clone(),
             opts: self.opts.clone(),
         })
+    }
+}
+
+#[cfg(all(feature = "async", feature = "tokio"))]
+mod async_impl {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    use crate::{
+        AsyncTransactionalKVDB,
+        transactional::async_kvdb::{SpawnBlockingReadTx, SpawnBlockingWriteTx},
+    };
+
+    use super::super::RocksDB;
+    use super::{ReadTransaction, WriteTransaction};
+
+    #[async_trait]
+    impl AsyncTransactionalKVDB for RocksDB {
+        type ReadTransaction<'a> = SpawnBlockingReadTx<ReadTransaction>;
+        type WriteTransaction<'a> = SpawnBlockingWriteTx<WriteTransaction>;
+
+        async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let tx = crate::TransactionalKVDB::begin_read(&db)?;
+                Ok(SpawnBlockingReadTx {
+                    inner: Arc::new(Mutex::new(Some(tx))),
+                })
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        }
+
+        async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let tx = crate::TransactionalKVDB::begin_write(&db)?;
+                Ok(SpawnBlockingWriteTx {
+                    inner: Arc::new(Mutex::new(Some(tx))),
+                })
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        }
     }
 }

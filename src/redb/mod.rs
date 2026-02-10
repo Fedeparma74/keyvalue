@@ -1,4 +1,4 @@
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Arc};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
@@ -11,18 +11,23 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RedbDB {
-    inner: Database,
+    inner: Arc<Database>,
 }
 
 impl RedbDB {
     pub fn open(path: &Path) -> io::Result<Self> {
         let inner = Database::create(path).map_err(database_error_to_io_error)?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 }
+
+#[cfg(feature = "tokio")]
+crate::impl_async_kvdb_via_spawn_blocking!(RedbDB);
 
 impl KeyValueDB for RedbDB {
     fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {

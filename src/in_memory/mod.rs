@@ -1,19 +1,73 @@
 use std::collections::HashMap;
 use std::io;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+
+#[cfg(feature = "async")]
+use async_trait::async_trait;
 
 use crate::KeyValueDB;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct InMemoryDB {
-    map: RwLock<HashMap<String, HashMap<String, Vec<u8>>>>,
+    map: Arc<RwLock<HashMap<String, HashMap<String, Vec<u8>>>>>,
 }
 
 impl InMemoryDB {
     pub fn new() -> Self {
         Self {
-            map: RwLock::new(HashMap::new()),
+            map: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+}
+
+#[cfg(feature = "async")]
+#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
+#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+impl crate::AsyncKeyValueDB for InMemoryDB {
+    async fn insert(
+        &self,
+        table_name: &str,
+        key: &str,
+        value: &[u8],
+    ) -> Result<Option<Vec<u8>>, io::Error> {
+        KeyValueDB::insert(self, table_name, key, value)
+    }
+    async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        KeyValueDB::get(self, table_name, key)
+    }
+    async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+        KeyValueDB::remove(self, table_name, key)
+    }
+    async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        KeyValueDB::iter(self, table_name)
+    }
+    async fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        KeyValueDB::table_names(self)
+    }
+    async fn iter_from_prefix(
+        &self,
+        table_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        KeyValueDB::iter_from_prefix(self, table_name, prefix)
+    }
+    async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
+        KeyValueDB::contains_table(self, table_name)
+    }
+    async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
+        KeyValueDB::contains_key(self, table_name, key)
+    }
+    async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
+        KeyValueDB::keys(self, table_name)
+    }
+    async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
+        KeyValueDB::values(self, table_name)
+    }
+    async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
+        KeyValueDB::delete_table(self, table_name)
+    }
+    async fn clear(&self) -> Result<(), io::Error> {
+        KeyValueDB::clear(self)
     }
 }
 

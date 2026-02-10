@@ -17,11 +17,15 @@ const DEFAULT_CF: &str = "default";
 
 type Rocks = DBWithThreadMode<MultiThreaded>;
 
+#[derive(Clone)]
 pub struct RocksDB {
     inner: Arc<Rocks>,
     path: String,
     opts: Arc<Options>,
 }
+
+#[cfg(feature = "tokio")]
+crate::impl_async_kvdb_via_spawn_blocking!(RocksDB);
 
 impl RocksDB {
     pub fn open(path: &Path) -> io::Result<Self> {
