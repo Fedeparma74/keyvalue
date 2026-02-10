@@ -65,6 +65,7 @@ pub trait AsyncKeyValueDB: MaybeSendSync + 'static {
     }
 }
 
+#[cfg(feature = "tokio")]
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<T: KeyValueDB> AsyncKeyValueDB for T {
@@ -74,19 +75,19 @@ impl<T: KeyValueDB> AsyncKeyValueDB for T {
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        KeyValueDB::insert(self, table_name, key, value)
+        tokio::task::block_in_place(|| KeyValueDB::insert(self, table_name, key, value))
     }
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        KeyValueDB::get(self, table_name, key)
+        tokio::task::block_in_place(|| KeyValueDB::get(self, table_name, key))
     }
     async fn remove(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        KeyValueDB::remove(self, table_name, key)
+        tokio::task::block_in_place(|| KeyValueDB::remove(self, table_name, key))
     }
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        KeyValueDB::iter(self, table_name)
+        tokio::task::block_in_place(|| KeyValueDB::iter(self, table_name))
     }
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        KeyValueDB::table_names(self)
+        tokio::task::block_in_place(|| KeyValueDB::table_names(self))
     }
 
     async fn iter_from_prefix(
@@ -94,25 +95,25 @@ impl<T: KeyValueDB> AsyncKeyValueDB for T {
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        KeyValueDB::iter_from_prefix(self, table_name, prefix)
+        tokio::task::block_in_place(|| KeyValueDB::iter_from_prefix(self, table_name, prefix))
     }
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        KeyValueDB::contains_table(self, table_name)
+        tokio::task::block_in_place(|| KeyValueDB::contains_table(self, table_name))
     }
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        KeyValueDB::contains_key(self, table_name, key)
+        tokio::task::block_in_place(|| KeyValueDB::contains_key(self, table_name, key))
     }
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        KeyValueDB::keys(self, table_name)
+        tokio::task::block_in_place(|| KeyValueDB::keys(self, table_name))
     }
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        KeyValueDB::values(self, table_name)
+        tokio::task::block_in_place(|| KeyValueDB::values(self, table_name))
     }
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
-        KeyValueDB::delete_table(self, table_name)
+        tokio::task::block_in_place(|| KeyValueDB::delete_table(self, table_name))
     }
     async fn clear(&self) -> Result<(), io::Error> {
-        KeyValueDB::clear(self)
+        tokio::task::block_in_place(|| KeyValueDB::clear(self))
     }
 }
 

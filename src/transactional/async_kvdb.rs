@@ -86,6 +86,7 @@ pub trait AsyncKVWriteTransaction<'a>: AsyncKVReadTransaction<'a> {
     }
 }
 
+#[cfg(feature = "tokio")]
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<'a, T> AsyncKVReadTransaction<'a> for T
@@ -93,15 +94,15 @@ where
     T: KVReadTransaction<'a>,
 {
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        KVReadTransaction::get(self, table_name, key)
+        tokio::task::block_in_place(|| KVReadTransaction::get(self, table_name, key))
     }
 
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        KVReadTransaction::iter(self, table_name)
+        tokio::task::block_in_place(|| KVReadTransaction::iter(self, table_name))
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        KVReadTransaction::table_names(self)
+        tokio::task::block_in_place(|| KVReadTransaction::table_names(self))
     }
 
     async fn iter_from_prefix(
@@ -109,26 +110,29 @@ where
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        KVReadTransaction::iter_from_prefix(self, table_name, prefix)
+        tokio::task::block_in_place(|| {
+            KVReadTransaction::iter_from_prefix(self, table_name, prefix)
+        })
     }
 
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        KVReadTransaction::contains_table(self, table_name)
+        tokio::task::block_in_place(|| KVReadTransaction::contains_table(self, table_name))
     }
 
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        KVReadTransaction::contains_key(self, table_name, key)
+        tokio::task::block_in_place(|| KVReadTransaction::contains_key(self, table_name, key))
     }
 
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        KVReadTransaction::keys(self, table_name)
+        tokio::task::block_in_place(|| KVReadTransaction::keys(self, table_name))
     }
 
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        KVReadTransaction::values(self, table_name)
+        tokio::task::block_in_place(|| KVReadTransaction::values(self, table_name))
     }
 }
 
+#[cfg(feature = "tokio")]
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<'a, T> AsyncKVWriteTransaction<'a> for T
@@ -141,30 +145,31 @@ where
         key: &str,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
-        KVWriteTransaction::insert(self, table_name, key, value)
+        tokio::task::block_in_place(|| KVWriteTransaction::insert(self, table_name, key, value))
     }
 
     async fn remove(&mut self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        KVWriteTransaction::remove(self, table_name, key)
+        tokio::task::block_in_place(|| KVWriteTransaction::remove(self, table_name, key))
     }
 
     async fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
-        KVWriteTransaction::delete_table(self, table_name)
+        tokio::task::block_in_place(|| KVWriteTransaction::delete_table(self, table_name))
     }
 
     async fn clear(&mut self) -> Result<(), io::Error> {
-        KVWriteTransaction::clear(self)
+        tokio::task::block_in_place(|| KVWriteTransaction::clear(self))
     }
 
     async fn commit(self) -> Result<(), io::Error> {
-        KVWriteTransaction::commit(self)
+        tokio::task::block_in_place(|| KVWriteTransaction::commit(self))
     }
 
     async fn abort(self) -> Result<(), io::Error> {
-        KVWriteTransaction::abort(self)
+        tokio::task::block_in_place(|| KVWriteTransaction::abort(self))
     }
 }
 
+#[cfg(feature = "tokio")]
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<T: TransactionalKVDB> AsyncTransactionalKVDB for T {
@@ -172,10 +177,10 @@ impl<T: TransactionalKVDB> AsyncTransactionalKVDB for T {
     type WriteTransaction<'a> = T::WriteTransaction<'a>;
 
     async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
-        TransactionalKVDB::begin_read(self)
+        tokio::task::block_in_place(|| TransactionalKVDB::begin_read(self))
     }
 
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
-        TransactionalKVDB::begin_write(self)
+        tokio::task::block_in_place(|| TransactionalKVDB::begin_write(self))
     }
 }

@@ -57,6 +57,7 @@ default = ["std", "async"]
 std = []
 
 async = ["async-trait", "dep:futures"]
+tokio = ["async", "dep:tokio", "tokio/rt-multi-thread"]
 transactional = []
 versioned = []
 
@@ -93,6 +94,7 @@ indexed-db = [
 test = [
     "std",
     "async",
+    "tokio",
     "transactional",
     "versioned",
     "in-memory",

@@ -16,7 +16,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "in-memory"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_in_memory() {
         let db = keyvalue::in_memory::InMemoryDB::new();
         common::test_async_db(&db).await;
@@ -41,7 +41,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "versioned", feature = "in-memory"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_versioned_in_memory() {
         let db = keyvalue::in_memory::InMemoryDB::new();
         common::test_async_versioned_db(&db).await;
@@ -71,7 +71,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "redb"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_redb() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_redb_db");
@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_transactional_redb() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_transactional_redb_db");
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "fjall"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_fjall() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_fjall_db");
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_transactional_fjall() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_transactional_fjall_db");
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "rocksdb"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_rocksdb() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_rocksdb");
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "rocksdb"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_transactional_rocksdb() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_transactional_rocksdb_db");
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "sqlite"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_sqlite() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_sqlite_db");
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_transactional_sqlite() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test_async_transactional_sqlite_db");
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[cfg(all(feature = "async", feature = "aws-s3"))]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_async_aws_s3() {
         let endpoint_url = std::env::var("AWS_S3_ENDPOINT_URL").expect("AWS_S3_ENDPOINT_URL");
         let region = std::env::var("AWS_S3_REGION").expect("AWS_S3_REGION");
