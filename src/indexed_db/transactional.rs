@@ -37,11 +37,21 @@ enum TableUpdate {
     Deleted(String), // table name
 }
 
+/// Read-only IndexedDB transaction.
+///
+/// Reads are dispatched through the shared command channel and executed
+/// inside a read-only IDB transaction.
 pub struct ReadTransaction {
     command_request_sender:
         UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
 }
 
+/// Read-write IndexedDB transaction.
+///
+/// Write operations are collected in `operations` and replayed inside a
+/// single read-write IDB transaction on [`commit`](AsyncKVWriteTransaction::commit).
+/// Reads replay pending writes first (inside an aborted rw-transaction) to
+/// provide read-your-own-write semantics.
 pub struct WriteTransaction {
     name: String,
     version: Arc<AtomicU32>,

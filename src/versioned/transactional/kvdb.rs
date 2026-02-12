@@ -5,6 +5,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+/// Synchronous transactional key-value store with per-entry versioning.
+///
+/// Blanket-implemented for every `T: TransactionalKVDB`.
 pub trait VersionedTransactionalKVDB: MaybeSendSync + 'static {
     type ReadTransaction<'a>: KVReadVersionedTransaction<'a>;
     type WriteTransaction<'a>: KVWriteVersionedTransaction<'a>;
@@ -13,6 +16,7 @@ pub trait VersionedTransactionalKVDB: MaybeSendSync + 'static {
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
 }
 
+/// Read-only versioned transaction.  Blanket-implemented for `T: KVReadTransaction`.
 pub trait KVReadVersionedTransaction<'a>: MaybeSendSync {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error>;
     fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error>;
@@ -54,6 +58,10 @@ pub trait KVReadVersionedTransaction<'a>: MaybeSendSync {
     }
 }
 
+/// Read-write versioned transaction.  Extends [`KVReadVersionedTransaction`]
+/// with mutations, auto-increment [`update`](Self::update), and
+/// soft-delete / prune on [`delete_table`](Self::delete_table) and
+/// [`clear`](Self::clear).  Blanket-implemented for `T: KVWriteTransaction`.
 pub trait KVWriteVersionedTransaction<'a>: KVReadVersionedTransaction<'a> {
     /// Inserts or updates the value of the key in the table with the specified version.
     /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.

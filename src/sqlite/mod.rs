@@ -1,3 +1,11 @@
+//! [SQLite](https://docs.rs/turso)-backed key-value store (async-only).
+//!
+//! Each table is a SQLite table with columns `(key TEXT PRIMARY KEY, value BLOB)`.
+//! The database uses WAL journal mode for better concurrent read performance.
+//!
+//! **Note:** This backend only implements [`AsyncKeyValueDB`](crate::AsyncKeyValueDB)
+//! because the underlying `turso` driver is async.
+
 use std::{io, path::Path, sync::Arc};
 
 use async_trait::async_trait;
@@ -9,6 +17,10 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+/// SQLite-backed async key-value database.
+///
+/// Wraps a `turso::Connection` and `turso::Database`. The connection is shared
+/// via `Arc` so the struct can be passed across async tasks.
 #[derive(Debug)]
 pub struct SqliteDB {
     conn: Arc<Connection>,
@@ -18,6 +30,11 @@ pub struct SqliteDB {
 /// Validates that a table name is a safe SQL identifier.
 /// Rejects empty names, names containing double-quote characters (to prevent SQL injection
 /// when used inside `"quoted_identifier"` syntax), and reserved SQLite-internal names.
+/// Validates that a table name is safe to use in SQL statements.
+///
+/// Rejects empty names, names containing double-quote characters (which
+/// would break identifier quoting), and names starting with `sqlite_`
+/// (which are reserved by SQLite internals).
 pub(crate) fn validate_table_name(table: &str) -> Result<(), io::Error> {
     if table.is_empty() {
         return Err(io::Error::new(
@@ -41,6 +58,7 @@ pub(crate) fn validate_table_name(table: &str) -> Result<(), io::Error> {
 }
 
 /// Escapes `%`, `_` and `\` in a LIKE pattern so the literal string is matched.
+/// Escapes special characters for `LIKE` pattern matching.
 fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -55,6 +73,7 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+/// Returns `true` if a table with the given name exists in the database.
 pub(crate) async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error> {
     let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
     let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
@@ -62,6 +81,7 @@ pub(crate) async fn table_exists(conn: &Connection, table: &str) -> Result<bool,
     Ok(rows.next().await.map_err(io::Error::other)?.is_some())
 }
 
+/// Creates the table if it does not already exist, after validating the name.
 pub(crate) async fn ensure_table(conn: &Connection, table: &str) -> Result<(), io::Error> {
     validate_table_name(table)?;
     if !table_exists(conn, table).await? {
@@ -75,6 +95,10 @@ pub(crate) async fn ensure_table(conn: &Connection, table: &str) -> Result<(), i
 }
 
 impl SqliteDB {
+    /// Opens (or creates) a SQLite database at the given filesystem `path`.
+    ///
+    /// The connection is configured with `PRAGMA journal_mode=WAL` for
+    /// improved concurrent read throughput.
     pub async fn open(path: &Path) -> io::Result<Self> {
         let inner = Builder::new_local(
             path.to_str()

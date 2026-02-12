@@ -1,3 +1,32 @@
+//! Browser [IndexedDB](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API)-backed
+//! key-value store (**WASM-only**, async-only).
+//!
+//! IndexedDB is a transactional, object-oriented database built into every
+//! modern browser.  This module wraps it behind a command-channel pattern:
+//! a background task (spawned via [`wasmt`]) owns the database connection and
+//! processes requests sequentially, making the API safe to use from any async
+//! context.
+//!
+//! Tables are mapped to IndexedDB *object stores*.  Because object stores
+//! can only be created/deleted during a *version change* event, table
+//! creation and deletion bump the database version and re-open the
+//! connection.  This makes structural changes (create/drop table) heavier
+//! than data operations.
+//!
+//! ## Feature flags
+//!
+//! * `indexed-db` — Enables this module and pulls in the `indexed-db`,
+//!   `js-sys` and `wasmt` crates.
+//! * `transactional` — Adds [`AsyncTransactionalKVDB`](crate::AsyncTransactionalKVDB)
+//!   support with read/write transaction types.
+//!
+//! ## Threading
+//!
+//! When the WASM binary is compiled with `target-feature = +atomics,
+//! +bulk-memory, +mutable-globals`, the background task is spawned on a
+//! Web Worker via [`wasmt::task::spawn`]; otherwise [`wasmt::task::spawn_local`]
+//! is used.
+
 use core::{convert::Infallible, pin::Pin};
 use std::{
     io,
@@ -44,6 +73,15 @@ enum CommandResponse {
     Error(std::io::Error),
 }
 
+/// Async key-value database backed by the browser's IndexedDB API (**WASM-only**).
+///
+/// Internally runs a single-threaded event loop that serialises all
+/// IndexedDB operations through a command channel.  This ensures that
+/// version-change transactions (needed to create/delete object stores) are
+/// never interleaved with data transactions.
+///
+/// Created via [`IndexedDB::open`].  The database connection is closed
+/// automatically when the struct is dropped.
 pub struct IndexedDB {
     name: String,
     version: Arc<AtomicU32>,

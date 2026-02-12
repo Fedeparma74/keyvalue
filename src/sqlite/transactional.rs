@@ -10,9 +10,17 @@ use crate::{
 
 use super::SqliteDB;
 
+/// Read-only SQLite transaction.
+///
+/// Backed by a dedicated [`Connection`] with a `BEGIN DEFERRED` transaction.
 pub struct ReadTransaction {
     conn: Connection,
 }
+
+/// Read-write SQLite transaction.
+///
+/// Backed by a dedicated [`Connection`] with a `BEGIN IMMEDIATE` transaction.
+/// Tables are lazily created on first write.
 pub struct WriteTransaction {
     conn: Arc<Connection>,
 }

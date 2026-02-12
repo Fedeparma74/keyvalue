@@ -1,3 +1,11 @@
+//! [fjall](https://docs.rs/fjall)-backed key-value store.
+//!
+//! `fjall` is an LSM-tree-based embedded database for Rust. This module
+//! provides [`FjallDB`], which maps the `keyvalue` table concept onto fjall's
+//! *keyspaces*. Because fjall does not support dropping keyspaces at runtime,
+//! a soft-deletion strategy is used: deleted keyspaces have their data erased
+//! and their name recorded in an internal `_meta_deleted` keyspace.
+
 use std::{
     collections::HashSet,
     io,
@@ -22,8 +30,14 @@ pub use self::transactional::{ReadTransaction, WriteTransaction};
 #[cfg(feature = "tokio")]
 crate::impl_async_kvdb_via_spawn_blocking!(FjallDB);
 
+/// Marker keyspace that tracks which user keyspaces have been logically deleted.
 const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
+/// Key-value database backed by [fjall](https://docs.rs/fjall).
+///
+/// Each table maps to a fjall *keyspace*. Deletion is soft: all entries are
+/// removed and the keyspace name is recorded in `_meta_deleted`. Re-inserting
+/// into a deleted keyspace transparently un-deletes it.
 #[derive(Clone)]
 pub struct FjallDB {
     inner: SingleWriterTxDatabase,
@@ -31,6 +45,10 @@ pub struct FjallDB {
 }
 
 impl FjallDB {
+    /// Opens (or creates) a fjall database at the given filesystem `path`.
+    ///
+    /// On startup the `_meta_deleted` keyspace is read to restore the set of
+    /// logically deleted tables.
     pub fn open(path: &Path) -> io::Result<Self> {
         let inner = SingleWriterTxDatabase::builder(path)
             .open()

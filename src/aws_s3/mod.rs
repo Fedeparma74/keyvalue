@@ -1,3 +1,13 @@
+//! AWS S3 (or S3-compatible) key-value store (async-only).
+//!
+//! Tables are represented as **key prefixes** within a single S3 bucket:
+//! an entry with table `"users"` and key `"alice"` is stored as the S3
+//! object `users/alice`. This means that neither table names nor keys may
+//! contain the `/` character.
+//!
+//! This backend is suitable for durable, cloud-native storage but has
+//! higher latency per operation compared to local embedded databases.
+
 use std::{collections::HashSet, io};
 
 use async_trait::async_trait;
@@ -11,6 +21,10 @@ mod client;
 
 use self::client::{HttpClientImpl, SleepImpl, TimeSourceImpl};
 
+/// Async key-value database backed by AWS S3 (or any S3-compatible service).
+///
+/// Created via [`AwsS3DB::open`], which takes endpoint, region, credentials,
+/// and a bucket name. The bucket is created automatically if it doesn't exist.
 #[derive(Debug)]
 pub struct AwsS3DB {
     client: Client,
@@ -18,6 +32,14 @@ pub struct AwsS3DB {
 }
 
 impl AwsS3DB {
+    /// Connects to the S3-compatible service and ensures the bucket exists.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_url` — The S3 endpoint (e.g. `"http://localhost:9000"` for MinIO).
+    /// * `region` — AWS region name.
+    /// * `credentials` — Access key / secret key pair.
+    /// * `bucket_name` — Name of the bucket to use (created if absent).
     pub async fn open(
         endpoint_url: &str,
         region: &str,

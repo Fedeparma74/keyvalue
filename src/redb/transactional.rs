@@ -12,10 +12,15 @@ use super::{
     transaction_error_to_io_error,
 };
 
+/// Read-only snapshot backed by a [`redb::ReadTransaction`].
 pub struct ReadTransaction {
     tx: redb::ReadTransaction,
 }
 
+/// Read-write transaction backed by a [`redb::WriteTransaction`].
+///
+/// Durability is set to [`Immediate`](redb::Durability::Immediate) so that
+/// every committed transaction is guaranteed to be persisted.
 pub struct WriteTransaction {
     tx: redb::WriteTransaction,
 }

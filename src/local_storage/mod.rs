@@ -1,3 +1,24 @@
+//! Browser [`LocalStorage`](https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage)-backed
+//! key-value store (**WASM-only**).
+//!
+//! Entries are persisted across page reloads inside the browser's
+//! `localStorage` API. Data is scoped by a *database name* passed to
+//! [`LocalStorageDB::open`] and stored with the key format
+//! `<db_name>/<table_name>/<key>`. This means **neither table names nor keys
+//! may contain `/`**.
+//!
+//! ## Capacity
+//!
+//! Most browsers limit `localStorage` to ~5 MiB.  Values are serialised as
+//! JSON arrays of bytes via `gloo-storage`, so actual usable capacity is
+//! lower than the raw limit.
+//!
+//! ## Threading
+//!
+//! `LocalStorage` is only accessible from the main thread.  The struct does
+//! not implement `Send`/`Sync` on non-WASM targets (the `MaybeSendSync`
+//! trait relaxes these bounds on `wasm32`).
+
 use std::{collections::HashSet, io};
 
 #[cfg(feature = "async")]
@@ -23,12 +44,20 @@ fn validate_name(kind: &str, name: &str) -> Result<(), io::Error> {
     Ok(())
 }
 
+/// Browser `localStorage`-backed key-value database (**WASM-only**).
+///
+/// Created via [`LocalStorageDB::open`].  Each instance is scoped to a
+/// database name, so multiple independent stores can coexist in the same
+/// origin.
 #[derive(Debug)]
 pub struct LocalStorageDB {
     name: String,
 }
 
 impl LocalStorageDB {
+    /// Opens a `LocalStorage`-backed store with the given `db_name`.
+    ///
+    /// The name is used as a prefix for all `localStorage` keys.
     pub fn open(db_name: &str) -> io::Result<Self> {
         Ok(Self {
             name: db_name.to_string(),

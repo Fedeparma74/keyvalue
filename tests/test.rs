@@ -1,9 +1,25 @@
+//! Integration tests for every backend, covering all trait combinations:
+//!
+//! - `KeyValueDB` (sync) + edge cases
+//! - `AsyncKeyValueDB`
+//! - `VersionedKeyValueDB` (sync) + soft-delete
+//! - `AsyncVersionedKeyValueDB`
+//! - `TransactionalKVDB` (sync) + RYOW semantics
+//! - `AsyncTransactionalKVDB`
+//! - `VersionedTransactionalKVDB` (sync)
+//! - `AsyncVersionedTransactionalKVDB`
+//! - Persistence (close + reopen)
+
 #[cfg(all(feature = "test", not(target_arch = "wasm32")))]
 mod common;
 
 #[cfg(all(feature = "test", not(target_arch = "wasm32")))]
 mod tests {
     use super::common;
+
+    // =======================================================================
+    // InMemoryDB
+    // =======================================================================
 
     #[cfg(feature = "in-memory")]
     #[test]
@@ -13,6 +29,13 @@ mod tests {
         common::persist_test_data(Box::new(db));
         let db = keyvalue::in_memory::InMemoryDB::new();
         assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(feature = "in-memory")]
+    #[test]
+    fn test_in_memory_edge_cases() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_db_edge_cases(&db);
     }
 
     #[cfg(all(feature = "async", feature = "in-memory"))]
@@ -30,14 +53,25 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "async", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_in_memory_edge_cases() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_db_edge_cases(&db).await;
+    }
+
     #[cfg(all(feature = "versioned", feature = "in-memory"))]
     #[test]
     fn test_versioned_in_memory() {
         let db = keyvalue::in_memory::InMemoryDB::new();
         common::test_versioned_db(&db);
-        common::persist_test_data(Box::new(db));
+    }
+
+    #[cfg(all(feature = "versioned", feature = "in-memory"))]
+    #[test]
+    fn test_versioned_in_memory_soft_delete() {
         let db = keyvalue::in_memory::InMemoryDB::new();
-        assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+        common::test_versioned_soft_delete(&db);
     }
 
     #[cfg(all(feature = "async", feature = "versioned", feature = "in-memory"))]
@@ -45,15 +79,11 @@ mod tests {
     async fn test_async_versioned_in_memory() {
         let db = keyvalue::in_memory::InMemoryDB::new();
         common::test_async_versioned_db(&db).await;
-        common::persist_test_data_async(Box::new(db)).await;
-        let db = keyvalue::in_memory::InMemoryDB::new();
-        assert!(
-            keyvalue::AsyncKeyValueDB::table_names(&db)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
+
+    // =======================================================================
+    // RedbDB
+    // =======================================================================
 
     #[cfg(feature = "redb")]
     #[test]
@@ -68,6 +98,15 @@ mod tests {
         assert!(!keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
         keyvalue::KeyValueDB::clear(&db).unwrap();
         assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(feature = "redb")]
+    #[test]
+    fn test_redb_edge_cases() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_redb_edge_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_db_edge_cases(&db);
     }
 
     #[cfg(all(feature = "async", feature = "redb"))]
@@ -93,6 +132,33 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "versioned", feature = "redb"))]
+    #[test]
+    fn test_versioned_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_versioned_redb_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_versioned_db(&db);
+    }
+
+    #[cfg(all(feature = "versioned", feature = "redb"))]
+    #[test]
+    fn test_versioned_redb_soft_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_versioned_redb_soft_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_versioned_soft_delete(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "versioned", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_versioned_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_versioned_redb_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_versioned_db(&db).await;
     }
 
     #[cfg(all(feature = "transactional", feature = "redb"))]
@@ -127,6 +193,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "transactional", feature = "redb"))]
+    #[test]
+    fn test_transactional_redb_ryow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_transactional_redb_ryow_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_transactional_ryow(&db);
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
@@ -176,6 +251,33 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "versioned", feature = "transactional", feature = "redb"))]
+    #[test]
+    fn test_versioned_transactional_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_vtx_redb_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_versioned_transactional_db(&db);
+    }
+
+    #[cfg(all(
+        feature = "async",
+        feature = "versioned",
+        feature = "transactional",
+        feature = "redb"
+    ))]
+    #[tokio::test]
+    async fn test_async_versioned_transactional_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_vtx_redb_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_versioned_transactional_db(&db).await;
+    }
+
+    // =======================================================================
+    // FjallDB
+    // =======================================================================
+
     #[cfg(feature = "fjall")]
     #[test]
     fn test_fjall() {
@@ -189,6 +291,15 @@ mod tests {
         assert!(!keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
         keyvalue::KeyValueDB::clear(&db).unwrap();
         assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_fjall_edge_cases() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_fjall_edge_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_db_edge_cases(&db);
     }
 
     #[cfg(all(feature = "async", feature = "fjall"))]
@@ -214,6 +325,33 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "versioned", feature = "fjall"))]
+    #[test]
+    fn test_versioned_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_versioned_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_versioned_db(&db);
+    }
+
+    #[cfg(all(feature = "versioned", feature = "fjall"))]
+    #[test]
+    fn test_versioned_fjall_soft_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_versioned_fjall_soft_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_versioned_soft_delete(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "versioned", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_versioned_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_versioned_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_versioned_db(&db).await;
     }
 
     #[cfg(all(feature = "transactional", feature = "fjall"))]
@@ -248,6 +386,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_transactional_fjall_ryow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_transactional_fjall_ryow_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_transactional_ryow(&db);
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
@@ -297,6 +444,33 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "versioned", feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_versioned_transactional_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_vtx_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_versioned_transactional_db(&db);
+    }
+
+    #[cfg(all(
+        feature = "async",
+        feature = "versioned",
+        feature = "transactional",
+        feature = "fjall"
+    ))]
+    #[tokio::test]
+    async fn test_async_versioned_transactional_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_vtx_fjall_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_versioned_transactional_db(&db).await;
+    }
+
+    // =======================================================================
+    // RocksDB
+    // =======================================================================
+
     #[cfg(feature = "rocksdb")]
     #[test]
     fn test_rocksdb() {
@@ -310,6 +484,15 @@ mod tests {
         assert!(!keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
         keyvalue::KeyValueDB::clear(&db).unwrap();
         assert!(keyvalue::KeyValueDB::table_names(&db).unwrap().is_empty());
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_rocksdb_edge_cases() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_rocksdb_edge");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_db_edge_cases(&db);
     }
 
     #[cfg(all(feature = "async", feature = "rocksdb"))]
@@ -335,6 +518,33 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "versioned", feature = "rocksdb"))]
+    #[test]
+    fn test_versioned_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_versioned_rocksdb");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_versioned_db(&db);
+    }
+
+    #[cfg(all(feature = "versioned", feature = "rocksdb"))]
+    #[test]
+    fn test_versioned_rocksdb_soft_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_versioned_rocksdb_soft");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_versioned_soft_delete(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "versioned", feature = "rocksdb"))]
+    #[tokio::test]
+    async fn test_async_versioned_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_versioned_rocksdb");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_versioned_db(&db).await;
     }
 
     #[cfg(all(feature = "transactional", feature = "rocksdb"))]
@@ -369,6 +579,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_transactional_rocksdb_ryow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_transactional_rocksdb_ryow_db");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_transactional_ryow(&db);
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "rocksdb"))]
@@ -418,6 +637,33 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "versioned", feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_versioned_transactional_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_vtx_rocksdb_db");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_versioned_transactional_db(&db);
+    }
+
+    #[cfg(all(
+        feature = "async",
+        feature = "versioned",
+        feature = "transactional",
+        feature = "rocksdb"
+    ))]
+    #[tokio::test]
+    async fn test_async_versioned_transactional_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_vtx_rocksdb_db");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_versioned_transactional_db(&db).await;
+    }
+
+    // =======================================================================
+    // SqliteDB (async-only)
+    // =======================================================================
+
     #[cfg(all(feature = "async", feature = "sqlite"))]
     #[tokio::test]
     async fn test_async_sqlite() {
@@ -441,6 +687,24 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[cfg(all(feature = "async", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_sqlite_edge_cases() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_sqlite_edge_db");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_db_edge_cases(&db).await;
+    }
+
+    #[cfg(all(feature = "async", feature = "versioned", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_versioned_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_versioned_sqlite_db");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_versioned_db(&db).await;
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
@@ -489,6 +753,24 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[cfg(all(
+        feature = "async",
+        feature = "versioned",
+        feature = "transactional",
+        feature = "sqlite"
+    ))]
+    #[tokio::test]
+    async fn test_async_versioned_transactional_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test_async_vtx_sqlite_db");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_versioned_transactional_db(&db).await;
+    }
+
+    // =======================================================================
+    // AwsS3DB (async-only, requires env vars)
+    // =======================================================================
 
     #[cfg(all(feature = "async", feature = "aws-s3"))]
     #[tokio::test]

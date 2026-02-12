@@ -30,6 +30,12 @@ fn new_owned_snapshot(db: &Arc<Rocks>) -> ManuallyDrop<SnapshotWithThreadMode<'s
 // Transaction types (owned – no lifetime parameter)
 // ---------------------------------------------------------------------------
 
+/// Read-only snapshot of a RocksDB database.
+///
+/// The underlying [`SnapshotWithThreadMode`] is co-located with an
+/// `Arc<Rocks>` so the database outlives the snapshot.  A custom
+/// [`Drop`] impl ensures the snapshot is released before the `Arc`
+/// ref-count is decremented.
 pub struct ReadTransaction {
     db: Arc<Rocks>,
     snapshot: ManuallyDrop<SnapshotWithThreadMode<'static, Rocks>>,
@@ -44,6 +50,11 @@ impl Drop for ReadTransaction {
     }
 }
 
+/// Read-write transaction for RocksDB.
+///
+/// Mutations are buffered in `pending` and applied atomically via a
+/// [`WriteBatch`] on [`commit`](KVWriteTransaction::commit).  A snapshot
+/// is held for consistent reads with RYOW semantics.
 pub struct WriteTransaction {
     db: Arc<Rocks>,
     snapshot: ManuallyDrop<SnapshotWithThreadMode<'static, Rocks>>,

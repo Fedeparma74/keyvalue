@@ -7,6 +7,12 @@ use async_trait::async_trait;
 #[cfg(feature = "tokio")]
 use super::{KVReadTransaction, KVWriteTransaction};
 
+/// Async counterpart of [`TransactionalKVDB`](crate::TransactionalKVDB).
+///
+/// Provides the same begin / commit / abort transactional workflow but
+/// with `async` methods.  On `tokio`-enabled native targets,
+/// [`SpawnBlockingReadTx`] and [`SpawnBlockingWriteTx`] bridge sync
+/// transaction types into this async interface.
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncTransactionalKVDB: MaybeSendSync + 'static {
@@ -17,6 +23,7 @@ pub trait AsyncTransactionalKVDB: MaybeSendSync + 'static {
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
 }
 
+/// Read-only half of an async transaction.  See [`AsyncTransactionalKVDB`].
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKVReadTransaction<'a>: MaybeSendSync {
@@ -60,6 +67,9 @@ pub trait AsyncKVReadTransaction<'a>: MaybeSendSync {
     }
 }
 
+/// Read-write half of an async transaction.  Extends [`AsyncKVReadTransaction`]
+/// with mutating operations, plus [`commit`](Self::commit) and
+/// [`abort`](Self::abort) for finalisation.
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKVWriteTransaction<'a>: AsyncKVReadTransaction<'a> {

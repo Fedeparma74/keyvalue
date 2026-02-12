@@ -7,6 +7,9 @@ use alloc::{string::String, vec::Vec};
 
 use async_trait::async_trait;
 
+/// Async transactional key-value store with per-entry versioning.
+///
+/// Blanket-implemented for every `T: AsyncTransactionalKVDB`.
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncVersionedTransactionalKVDB: MaybeSendSync + 'static {
@@ -17,6 +20,8 @@ pub trait AsyncVersionedTransactionalKVDB: MaybeSendSync + 'static {
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
 }
 
+/// Async read-only versioned transaction.  Blanket-implemented for
+/// `T: AsyncKVReadTransaction`.
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKVReadVersionedTransaction<'a>: MaybeSendSync {
@@ -60,6 +65,10 @@ pub trait AsyncKVReadVersionedTransaction<'a>: MaybeSendSync {
     }
 }
 
+/// Async read-write versioned transaction.  Extends
+/// [`AsyncKVReadVersionedTransaction`] with mutations, auto-increment
+/// [`update`](Self::update), and soft-delete / prune.  Blanket-implemented
+/// for `T: AsyncKVWriteTransaction`.
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncKVWriteVersionedTransaction<'a>: AsyncKVReadVersionedTransaction<'a> {

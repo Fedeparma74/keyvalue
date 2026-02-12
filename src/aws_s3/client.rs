@@ -18,6 +18,10 @@ use core::str::FromStr;
 use reqwest::header::HeaderName;
 use std::time::SystemTime;
 
+/// Cross-platform [`TimeSource`] that returns `SystemTime::now()`.
+///
+/// On WASM targets the clock is sourced from `web_time` and then converted
+/// to `std::time::SystemTime` so the AWS SDK receives a consistent type.
 #[derive(Debug)]
 pub struct TimeSourceImpl;
 impl TimeSource for TimeSourceImpl {
@@ -36,6 +40,13 @@ impl TimeSource for TimeSourceImpl {
     }
 }
 
+/// Wrapper around `gloo_timers::future::TimeoutFuture` that implements
+/// `Send + Sync` for use with the AWS SDK.
+///
+/// # Safety
+///
+/// On `wasm32` there is only one thread of execution, so `Send`/`Sync` are
+/// trivially safe.  The AWS SDK requires these bounds even on WASM targets.
 #[cfg(target_arch = "wasm32")]
 struct SendTimeoutFuture(gloo_timers::future::TimeoutFuture);
 
@@ -62,6 +73,9 @@ impl std::future::Future for SendTimeoutFuture {
     }
 }
 
+/// Cross-platform [`AsyncSleep`] implementation.
+///
+/// Uses `tokio::time::sleep` on native targets and `gloo_timers` on WASM.
 #[derive(Debug, Clone)]
 pub struct SleepImpl;
 impl AsyncSleep for SleepImpl {
@@ -79,6 +93,8 @@ trait MakeRequest {
     async fn send(req: Request) -> Result<Response<SdkBody>, reqwest::Error>;
 }
 
+/// HTTP client adapter that bridges the AWS SDK's [`HttpConnector`] interface
+/// to [`reqwest`], enabling the same transport on both native and WASM targets.
 pub struct ReqwestHttpClient;
 
 /// Shared reqwest client – avoids creating a new client (and connection pool) per request.
@@ -140,6 +156,8 @@ impl MakeRequest for ReqwestHttpClient {
     }
 }
 
+/// Top-level [`HttpClient`] implementation that vends [`HttpClientImpl`]
+/// connectors for the AWS SDK runtime.
 #[derive(Debug, Clone)]
 pub struct HttpClientImpl;
 

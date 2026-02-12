@@ -12,6 +12,11 @@ fn lock_poisoned() -> io::Error {
     io::Error::other("RwLock poisoned")
 }
 
+/// Read-only snapshot of a Fjall database.
+///
+/// Uses [`fjall::Snapshot`] to provide a consistent point-in-time view.
+/// Tables that were soft-deleted *before* the snapshot was taken are
+/// excluded from all reads.
 pub struct ReadTransaction {
     snapshot: Snapshot,
     db: SingleWriterTxDatabase,
@@ -19,6 +24,12 @@ pub struct ReadTransaction {
     deleted_tables: HashSet<String>,
 }
 
+/// Read-write transaction for Fjall.
+///
+/// Mutations are buffered in `pending` and only flushed to the underlying
+/// LSM keyspaces on [`commit`](KVWriteTransaction::commit).
+/// A `snapshot` is kept for read-your-own-write (RYOW) semantics:
+/// reads first check the pending buffer, then fall through to the snapshot.
 pub struct WriteTransaction {
     db: SingleWriterTxDatabase,
     snapshot: Snapshot,

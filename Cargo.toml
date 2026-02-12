@@ -7,6 +7,9 @@ edition = "2024"
 # no-std
 core2 = { version = "0.4", default-features = false }
 
+# data structures
+dashmap = { version = "6", optional = true }
+
 # async
 async-trait = { version = "0.1", optional = true }
 futures = { version = "0.3", default-features = false, features = [
@@ -61,7 +64,7 @@ tokio = ["async", "dep:tokio", "tokio/rt-multi-thread"]
 transactional = []
 versioned = []
 
-in-memory = ["std"]
+in-memory = ["std", "dep:dashmap"]
 redb = ["std", "dep:redb"]
 fjall = ["std", "dep:fjall"]
 sqlite = ["std", "async", "dep:turso"]

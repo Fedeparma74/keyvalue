@@ -1,3 +1,18 @@
+//! Versioned key-value storage.
+//!
+//! This module extends the base key-value abstraction with per-entry version
+//! tracking. Every stored value is wrapped in a [`VersionedObject`] that pairs
+//! the raw bytes with a monotonically increasing `u64` version number.
+//!
+//! A versioned "delete" sets the value to `None` while preserving (and
+//! incrementing) the version, which is useful for conflict detection and
+//! synchronisation protocols. For permanent removal, use
+//! [`remove()`](crate::VersionedKeyValueDB::remove) or
+//! [`delete_table(_, true)`](crate::VersionedKeyValueDB::delete_table).
+//!
+//! Encoding helpers [`encode`] and [`decode`] serialise `VersionedObject` to
+//! a compact binary format suitable for storage in any `KeyValueDB` backend.
+
 use crate::io;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -10,6 +25,10 @@ mod kvdb;
 pub use async_kvdb::*;
 pub use kvdb::*;
 
+/// A value paired with its version number.
+///
+/// When `value` is `None` the entry is a *tombstone*: it has been logically
+/// deleted but the version is preserved for synchronisation purposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedObject {
     pub value: Option<Vec<u8>>,
@@ -22,6 +41,12 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use transactional::*;
 
+/// Encodes a [`VersionedObject`] into a compact binary representation.
+///
+/// Format: `[tag:1][version:8][len:4][value:len]`
+///   - `tag = 0` — tombstone (`None` value), no length/value fields.
+///   - `tag = 1` — live entry, followed by a little-endian `u32` length and
+///     the raw value bytes.
 pub fn encode(obj: &VersionedObject) -> Result<Vec<u8>, io::Error> {
     let value_len = obj.value.as_ref().map(|v| v.len()).unwrap_or(0);
 
@@ -56,6 +81,10 @@ pub fn encode(obj: &VersionedObject) -> Result<Vec<u8>, io::Error> {
     Ok(buf)
 }
 
+/// Decodes bytes produced by [`encode`] back into a [`VersionedObject`].
+///
+/// Returns an error if the buffer is too small, contains an invalid tag,
+/// or has trailing bytes.
 pub fn decode(bytes: &[u8]) -> io::Result<VersionedObject> {
     let mut cursor = bytes;
 

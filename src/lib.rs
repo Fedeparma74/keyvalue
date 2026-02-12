@@ -1,3 +1,57 @@
+//! # keyvalue
+//!
+//! A unified, backend-agnostic key-value database abstraction library for Rust.
+//!
+//! This crate provides a common set of traits ([`KeyValueDB`], [`AsyncKeyValueDB`]) that abstract
+//! over multiple storage backends, allowing applications to swap implementations without changing
+//! business logic. It supports both synchronous and asynchronous APIs, optional transactional
+//! semantics via the [`TransactionalKVDB`] / [`AsyncTransactionalKVDB`] traits, and
+//! version-tracked entries via the [`VersionedKeyValueDB`] / [`AsyncVersionedKeyValueDB`] traits.
+//!
+//! ## Supported backends
+//!
+//! | Backend | Feature flag | Sync | Async | Transactional |
+//! |---------|-------------|------|-------|---------------|
+//! | In-memory (HashMap) | `in-memory` | ✓ | ✓ | — |
+//! | [redb](https://docs.rs/redb) | `redb` | ✓ | ✓ (tokio) | ✓ |
+//! | [fjall](https://docs.rs/fjall) | `fjall` | ✓ | ✓ (tokio) | ✓ |
+//! | [RocksDB](https://docs.rs/rust-rocksdb) | `rocksdb` | ✓ | ✓ (tokio) | ✓ |
+//! | [SQLite (Turso)](https://docs.rs/turso) | `sqlite` | — | ✓ | ✓ |
+//! | AWS S3 | `aws-s3` | — | ✓ | — |
+//! | LocalStorage (WASM) | `local-storage` | ✓ | ✓ | — |
+//! | IndexedDB (WASM) | `indexed-db` | — | ✓ | ✓ |
+//!
+//! ## Feature flags
+//!
+//! - **`std`** — Enables standard library support (enabled by default).
+//! - **`async`** — Enables the [`AsyncKeyValueDB`] trait and async support (enabled by default).
+//! - **`tokio`** — Enables `spawn_blocking`-based async wrappers for synchronous backends.
+//! - **`transactional`** — Enables the transactional API traits.
+//! - **`versioned`** — Enables the versioned API traits.
+//!
+//! ## Quick start
+//!
+//! ```rust,no_run
+//! use keyvalue::{KeyValueDB, in_memory::InMemoryDB};
+//!
+//! let db = InMemoryDB::new();
+//! db.insert("users", "alice", b"data").unwrap();
+//! assert_eq!(db.get("users", "alice").unwrap(), Some(b"data".to_vec()));
+//! ```//!
+//! ## WASM support
+//!
+//! The following backends work on `wasm32-unknown-unknown`:
+//!
+//! | Backend | Notes |
+//! |---------|-------|
+//! | In-memory | Full sync + async support. Uses [`DashMap`](dashmap::DashMap) internally. |
+//! | LocalStorage | Sync + async. ~5 MiB browser limit. Main-thread only. |
+//! | IndexedDB | Async-only. Transactional. Uses a command-channel pattern via `wasmt`. |
+//! | AWS S3 | Async-only. Uses `reqwest` with `wasm-bindgen` transport. |
+//!
+//! On WASM the [`MaybeSendSync`] super-trait on all database traits relaxes
+//! the `Send + Sync` bounds, so types that are `!Send` (e.g. `Rc`-based
+//! browser APIs) can still implement the traits.
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 
 extern crate alloc;
@@ -7,10 +61,14 @@ use core2::io;
 #[cfg(feature = "std")]
 use std::io;
 
-/// Macro that generates an `AsyncKeyValueDB` implementation for a `Clone + KeyValueDB + Send + 'static`
-/// type using `tokio::task::spawn_blocking()`.
+/// Macro that generates an [`AsyncKeyValueDB`] implementation for any
+/// `Clone + KeyValueDB + Send + 'static` type by delegating every method to
+/// [`tokio::task::spawn_blocking()`].
 ///
-/// The type must be cheaply cloneable (e.g. via internal `Arc`s).
+/// The type must be cheaply cloneable (e.g. via internal `Arc`s) because each
+/// async call clones the database handle and moves it into the blocking task.
+///
+/// This macro is used internally by the `redb`, `fjall`, and `rocksdb` backends.
 #[cfg(feature = "tokio")]
 macro_rules! impl_async_kvdb_via_spawn_blocking {
     ($type:ty) => {
@@ -203,8 +261,15 @@ pub mod local_storage;
 #[cfg(all(feature = "indexed-db", target_arch = "wasm32"))]
 pub mod indexed_db;
 
+/// Conditional `Send + Sync` bound that is enforced on native targets with `std`
+/// but relaxed on `wasm32` or `no_std` environments.
+///
+/// This marker trait is used as a super-trait on all database traits so that
+/// implementations are thread-safe where the platform supports it, while still
+/// allowing single-threaded WASM targets to work without `Send`/`Sync`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "std"))]
 pub trait MaybeSendSync: Send + Sync {}
+/// See the `cfg(not(target_arch = "wasm32"))` variant for documentation.
 #[cfg(any(target_arch = "wasm32", not(feature = "std")))]
 pub trait MaybeSendSync {}
 

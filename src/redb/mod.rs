@@ -1,3 +1,11 @@
+//! [redb](https://docs.rs/redb)-backed key-value store.
+//!
+//! `redb` is a pure-Rust, ACID-compliant, embedded database. This module
+//! provides [`RedbDB`], which implements [`KeyValueDB`](crate::KeyValueDB)
+//! (and, when the `tokio` feature is enabled, [`AsyncKeyValueDB`](crate::AsyncKeyValueDB)
+//! via `spawn_blocking`). The optional `transactional` feature adds
+//! [`TransactionalKVDB`](crate::TransactionalKVDB) support.
+
 use std::{io, path::Path, sync::Arc};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
@@ -11,12 +19,17 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+/// Key-value database backed by [redb](https://docs.rs/redb).
+///
+/// Internally wraps a `redb::Database` behind an `Arc` so that cloning is
+/// cheap and the handle can be shared across threads.
 #[derive(Debug, Clone)]
 pub struct RedbDB {
     inner: Arc<Database>,
 }
 
 impl RedbDB {
+    /// Opens (or creates) a redb database at the given filesystem `path`.
     pub fn open(path: &Path) -> io::Result<Self> {
         let inner = Database::create(path).map_err(database_error_to_io_error)?;
 

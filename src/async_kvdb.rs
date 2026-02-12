@@ -6,7 +6,18 @@ use async_trait::async_trait;
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
+/// Asynchronous counterpart of [`crate::KeyValueDB`].
+///
+/// Provides the same table-oriented key-value semantics but with `async` methods.
+/// On native targets with `std` the trait requires `Send`; on `wasm32` or
+/// `no_std` builds the `Send` bound is relaxed.
+///
+/// Backends that are natively synchronous (redb, fjall, RocksDB) get an async
+/// implementation for free via the `impl_async_kvdb_via_spawn_blocking!` macro,
+/// which delegates to [`tokio::task::spawn_blocking`]. Natively async backends
+/// (SQLite/Turso, AWS S3, IndexedDB) implement this trait directly.
 pub trait AsyncKeyValueDB: MaybeSendSync + 'static {
+    /// Inserts a key-value pair. Returns the previous value, if any.
     async fn insert(
         &self,
         table_name: &str,
@@ -38,18 +49,20 @@ pub trait AsyncKeyValueDB: MaybeSendSync + 'static {
         Ok(self.get(table_name, key).await?.is_some())
     }
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        let mut keys = Vec::new();
-        for (key, _) in self.iter(table_name).await? {
-            keys.push(key);
-        }
-        Ok(keys)
+        Ok(self
+            .iter(table_name)
+            .await?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
     }
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in self.iter(table_name).await? {
-            values.push(value);
-        }
-        Ok(values)
+        Ok(self
+            .iter(table_name)
+            .await?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
     }
     async fn delete_table(&self, table_name: &str) -> Result<(), io::Error> {
         for key in self.keys(table_name).await? {

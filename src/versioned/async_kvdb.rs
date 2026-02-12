@@ -6,6 +6,14 @@ use async_trait::async_trait;
 
 use super::VersionedObject;
 
+/// Async counterpart of [`VersionedKeyValueDB`](crate::VersionedKeyValueDB).
+///
+/// Provides identical per-entry versioning semantics — insert with an
+/// explicit version, auto-increment via [`update`](Self::update), and
+/// soft-delete vs. prune on [`delete_table`](Self::delete_table) /
+/// [`clear`](Self::clear).
+///
+/// A blanket implementation is provided for every `T: AsyncKeyValueDB`.
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {

@@ -7,6 +7,19 @@ use alloc::{
 
 use super::VersionedObject;
 
+/// Synchronous key-value store with **per-entry versioning**.
+///
+/// Every value is wrapped in a [`VersionedObject`] that pairs the payload
+/// with a monotonically increasing `u64` version.  Two deletion modes are
+/// supported:
+///
+/// * **prune** (`prune = true`) — the entry is physically removed.
+/// * **soft-delete** (`prune = false`) — the entry remains but its value
+///   is set to `None` and the version is incremented, creating a
+///   *tombstone* that downstream consumers can observe.
+///
+/// A blanket implementation is provided for every `T: KeyValueDB`, so
+/// any backend automatically gains versioned semantics.
 pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
     /// Inserts or updates the value of the key in the table with the specified version.
     /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.

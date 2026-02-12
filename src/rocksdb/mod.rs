@@ -1,8 +1,13 @@
+//! [RocksDB](https://docs.rs/rust-rocksdb)-backed key-value store.
+//!
+//! Tables are mapped to RocksDB **column families**. The `default` column
+//! family is reserved by RocksDB itself and cannot be used as a table name.
+
 use std::{io, path::Path, sync::Arc};
 
 use rust_rocksdb::{
     ColumnFamilyDescriptor, DBCompressionType, DBWithThreadMode, Direction, IteratorMode,
-    MultiThreaded, Options, WriteBatch,
+    MultiThreaded, Options,
 };
 
 use crate::KeyValueDB;
@@ -13,10 +18,17 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+/// Reserved column family name that RocksDB creates automatically.
 const DEFAULT_CF: &str = "default";
 
+/// Multi-threaded RocksDB column-family type alias.
 type Rocks = DBWithThreadMode<MultiThreaded>;
 
+/// Key-value database backed by [RocksDB](https://docs.rs/rust-rocksdb).
+///
+/// Each table corresponds to a RocksDB column family. The database is opened
+/// with LZ4 compression, parallel compaction, and 128 MiB write buffers.
+/// The handle is wrapped in an `Arc` for cheap cloning.
 #[derive(Clone)]
 pub struct RocksDB {
     inner: Arc<Rocks>,
@@ -28,6 +40,9 @@ pub struct RocksDB {
 crate::impl_async_kvdb_via_spawn_blocking!(RocksDB);
 
 impl RocksDB {
+    /// Opens (or creates) a RocksDB database at the given filesystem `path`.
+    ///
+    /// Existing column families are re-opened automatically.
     pub fn open(path: &Path) -> io::Result<Self> {
         let path_str = path.to_string_lossy().to_string();
         let mut opts = Options::default();
@@ -79,8 +94,6 @@ impl KeyValueDB for RocksDB {
 
         let db = &*self.inner;
 
-        let mut batch = WriteBatch::default();
-
         // Create cf if not exists (race-safe: retry handle on create failure)
         let cf = if let Some(cf) = db.cf_handle(table) {
             cf
@@ -98,14 +111,9 @@ impl KeyValueDB for RocksDB {
         };
 
         let key_bytes = key.as_bytes();
-        let old = db
-            .get_cf(&cf, key_bytes)
-            .map_err(io::Error::other)?
-            .map(|v| v.to_vec());
+        let old = db.get_cf(&cf, key_bytes).map_err(io::Error::other)?;
 
-        batch.put_cf(&cf, key_bytes, value);
-
-        db.write(&batch).map_err(io::Error::other)?;
+        db.put_cf(&cf, key_bytes, value).map_err(io::Error::other)?;
 
         Ok(old)
     }
