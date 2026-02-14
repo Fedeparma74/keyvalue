@@ -12,7 +12,7 @@
 //!
 //! | Backend | Feature flag | Sync | Async | Transactional |
 //! |---------|-------------|------|-------|---------------|
-//! | In-memory (HashMap) | `in-memory` | ✓ | ✓ | — |
+//! | In-memory (HashMap) | `in-memory` | ✓ | ✓ | ✓ |
 //! | [redb](https://docs.rs/redb) | `redb` | ✓ | ✓ (tokio) | ✓ |
 //! | [fjall](https://docs.rs/fjall) | `fjall` | ✓ | ✓ (tokio) | ✓ |
 //! | [RocksDB](https://docs.rs/rust-rocksdb) | `rocksdb` | ✓ | ✓ (tokio) | ✓ |

@@ -25,6 +25,12 @@ use dashmap::DashMap;
 
 use crate::KeyValueDB;
 
+#[cfg(feature = "transactional")]
+mod transactional;
+
+#[cfg(feature = "transactional")]
+pub use self::transactional::{ReadTransaction, WriteTransaction};
+
 /// An in-memory key-value database using [`DashMap<String, HashMap<String, Vec<u8>>>`].
 ///
 /// The outer `DashMap` maps table names to their contents; each inner

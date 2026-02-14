@@ -81,6 +81,111 @@ mod tests {
         common::test_async_versioned_db(&db).await;
     }
 
+    #[cfg(all(feature = "transactional", feature = "in-memory"))]
+    #[test]
+    fn test_transactional_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_transactional_db(&db);
+        common::persist_test_data(Box::new(db.clone()));
+        common::check_test_data(&db);
+        {
+            let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+            assert!(
+                !keyvalue::KVReadTransaction::table_names(&read)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let mut write = keyvalue::TransactionalKVDB::begin_write(&db).unwrap();
+        keyvalue::KVWriteTransaction::clear(&mut write).unwrap();
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&write)
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::KVWriteTransaction::commit(write).unwrap();
+        let read = keyvalue::TransactionalKVDB::begin_read(&db).unwrap();
+        assert!(
+            keyvalue::KVReadTransaction::table_names(&read)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(feature = "transactional", feature = "in-memory"))]
+    #[test]
+    fn test_transactional_in_memory_ryow() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_transactional_ryow(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_transactional_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_transactional_db(&db).await;
+        common::persist_test_data_async(Box::new(db.clone())).await;
+        common::check_test_data_async(&db).await;
+        {
+            let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+                .await
+                .unwrap();
+            assert!(
+                !keyvalue::AsyncKVReadTransaction::table_names(&read)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let mut write = keyvalue::AsyncTransactionalKVDB::begin_write(&db)
+            .await
+            .unwrap();
+        keyvalue::AsyncKVWriteTransaction::clear(&mut write)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&write)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        keyvalue::AsyncKVWriteTransaction::commit(write)
+            .await
+            .unwrap();
+        let read = keyvalue::AsyncTransactionalKVDB::begin_read(&db)
+            .await
+            .unwrap();
+        assert!(
+            keyvalue::AsyncKVReadTransaction::table_names(&read)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(all(
+        feature = "versioned",
+        feature = "transactional",
+        feature = "in-memory"
+    ))]
+    #[test]
+    fn test_versioned_transactional_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_versioned_transactional_db(&db);
+    }
+
+    #[cfg(all(
+        feature = "async",
+        feature = "versioned",
+        feature = "transactional",
+        feature = "in-memory"
+    ))]
+    #[tokio::test]
+    async fn test_async_versioned_transactional_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_versioned_transactional_db(&db).await;
+    }
+
     // =======================================================================
     // RedbDB
     // =======================================================================
