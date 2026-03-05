@@ -2,6 +2,8 @@ use crate::{MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+use super::WriteOp;
+
 /// A key-value database that supports explicit read and write transactions.
 ///
 /// Transactions provide snapshot isolation for reads and atomic commit/abort
@@ -100,5 +102,36 @@ pub trait KVWriteTransaction<'a>: KVReadTransaction<'a> {
             self.delete_table(&table_name)?;
         }
         Ok(())
+    }
+
+    /// Applies a batch of [`WriteOp`]s and commits in a single step.
+    ///
+    /// The default implementation applies each operation individually and then
+    /// calls [`commit`](Self::commit).
+    fn batch_commit(mut self, ops: Vec<WriteOp>) -> Result<(), io::Error>
+    where
+        Self: Sized,
+    {
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    self.insert(&table_name, &key, &value)?;
+                }
+                WriteOp::Remove { table_name, key } => {
+                    self.remove(&table_name, &key)?;
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name)?;
+                }
+                WriteOp::Clear => {
+                    self.clear()?;
+                }
+            }
+        }
+        self.commit()
     }
 }

@@ -234,9 +234,9 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
                     db.close();
 
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current.checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                    })?;
+                    let new_version = current
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                     version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     let new_table_names = new_table_names.clone();
@@ -318,9 +318,9 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
                     db.close();
 
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current.checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                    })?;
+                    let new_version = current
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                     version.store(new_version, std::sync::atomic::Ordering::SeqCst);
                     *db = Factory::get()
                         .map_err(indexed_db_error_to_io_error)?
@@ -669,9 +669,9 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
                     db.close();
 
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current.checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                    })?;
+                    let new_version = current
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                     version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     *db = Factory::get()
@@ -740,9 +740,9 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
                     db.close();
 
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current.checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                    })?;
+                    let new_version = current
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                     version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     *db = Factory::get()

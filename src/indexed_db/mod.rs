@@ -205,9 +205,9 @@ impl AsyncKeyValueDB for IndexedDB {
 
                     let table_name_str = table_name.to_string();
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current.checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                    })?;
+                    let new_version = current
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                     version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     *db = Factory::get()
@@ -336,9 +336,9 @@ impl AsyncKeyValueDB for IndexedDB {
 
                         let table_name_str = table_name.to_string();
                         let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                        let new_version = current.checked_add(1).ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                        })?;
+                        let new_version = current
+                            .checked_add(1)
+                            .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                         version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                         *db = Factory::get()
@@ -500,9 +500,9 @@ impl AsyncKeyValueDB for IndexedDB {
 
                     let table_name_str = table_name.to_string();
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current.checked_add(1).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "IndexedDB version overflow")
-                    })?;
+                    let new_version = current
+                        .checked_add(1)
+                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
                     version.store(new_version, std::sync::atomic::Ordering::SeqCst);
 
                     *db = Factory::get()

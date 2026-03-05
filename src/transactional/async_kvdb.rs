@@ -4,6 +4,7 @@ use alloc::{string::String, vec::Vec};
 
 use async_trait::async_trait;
 
+use super::WriteOp;
 #[cfg(feature = "tokio")]
 use super::{KVReadTransaction, KVWriteTransaction};
 
@@ -94,6 +95,37 @@ pub trait AsyncKVWriteTransaction<'a>: AsyncKVReadTransaction<'a> {
             self.delete_table(&table).await?;
         }
         Ok(())
+    }
+
+    /// Applies a batch of [`WriteOp`]s and commits in a single step.
+    ///
+    /// The default implementation applies each operation individually and then
+    /// calls [`commit`](Self::commit).
+    async fn batch_commit(mut self, ops: Vec<WriteOp>) -> Result<(), io::Error>
+    where
+        Self: Sized,
+    {
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    self.insert(&table_name, &key, &value).await?;
+                }
+                WriteOp::Remove { table_name, key } => {
+                    self.remove(&table_name, &key).await?;
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name).await?;
+                }
+                WriteOp::Clear => {
+                    self.clear().await?;
+                }
+            }
+        }
+        self.commit().await
     }
 }
 
@@ -428,6 +460,36 @@ where
             let mut guard = self.inner.lock().map_err(|_| mutex_poisoned())?;
             let tx = guard.take().ok_or_else(tx_consumed)?;
             KVWriteTransaction::abort(tx)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn batch_commit(self, ops: Vec<WriteOp>) -> Result<(), io::Error> {
+        tokio::task::spawn_blocking(move || {
+            let mut guard = self.inner.lock().map_err(|_| mutex_poisoned())?;
+            let mut tx = guard.take().ok_or_else(tx_consumed)?;
+            for op in ops {
+                match op {
+                    WriteOp::Insert {
+                        table_name,
+                        key,
+                        value,
+                    } => {
+                        KVWriteTransaction::insert(&mut tx, &table_name, &key, &value)?;
+                    }
+                    WriteOp::Remove { table_name, key } => {
+                        KVWriteTransaction::remove(&mut tx, &table_name, &key)?;
+                    }
+                    WriteOp::DeleteTable { table_name } => {
+                        KVWriteTransaction::delete_table(&mut tx, &table_name)?;
+                    }
+                    WriteOp::Clear => {
+                        KVWriteTransaction::clear(&mut tx)?;
+                    }
+                }
+            }
+            KVWriteTransaction::commit(tx)
         })
         .await
         .map_err(io::Error::other)?
