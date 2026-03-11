@@ -22,6 +22,7 @@ pub struct ReadTransaction {
     db: SingleWriterTxDatabase,
     /// Snapshot of deleted tables taken at begin_read() time for isolation.
     deleted_tables: HashSet<String>,
+    max_memtable_size: u64,
 }
 
 /// Read-write transaction for Fjall.
@@ -36,6 +37,19 @@ pub struct WriteTransaction {
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>, // For RYOW
     tx_deleted_tables: HashSet<String>,                         // Local to this transaction
     global_deleted_tables: Arc<RwLock<HashSet<String>>>,        // Shared global state
+    max_memtable_size: u64,
+}
+
+impl ReadTransaction {
+    fn ks_options(&self) -> KeyspaceCreateOptions {
+        KeyspaceCreateOptions::default().max_memtable_size(self.max_memtable_size)
+    }
+}
+
+impl WriteTransaction {
+    fn ks_options(&self) -> KeyspaceCreateOptions {
+        KeyspaceCreateOptions::default().max_memtable_size(self.max_memtable_size)
+    }
 }
 
 impl<'a> KVReadTransaction<'a> for ReadTransaction {
@@ -54,7 +68,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
 
         let ks = self
             .db
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         Ok(self
@@ -79,7 +93,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
 
         let ks = self
             .db
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let mut result = Vec::new();
@@ -123,7 +137,7 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
 
         let ks = self
             .db
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let mut result = Vec::new();
@@ -171,7 +185,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
 
         let ks = self
             .db
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         Ok(self
@@ -209,7 +223,7 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         if self.db.keyspace_exists(table) {
             let ks = self
                 .db
-                .keyspace(table, KeyspaceCreateOptions::default)
+                .keyspace(table, || self.ks_options())
                 .map_err(io::Error::other)?;
 
             for item in self.snapshot.iter(&ks) {
@@ -354,7 +368,7 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
         for (table, map) in &self.pending {
             let ks = self
                 .db
-                .keyspace(table, KeyspaceCreateOptions::default)
+                .keyspace(table, || self.ks_options())
                 .map_err(io::Error::other)?;
 
             for (key_str, v_opt) in map {
@@ -381,7 +395,7 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
         for table in &self.tx_deleted_tables {
             let ks = self
                 .db
-                .keyspace(table, KeyspaceCreateOptions::default)
+                .keyspace(table, || self.ks_options())
                 .map_err(io::Error::other)?;
 
             for item in tx.iter(&ks) {
@@ -434,6 +448,7 @@ impl TransactionalKVDB for FjallDB {
             snapshot: self.inner.read_tx(),
             db: self.inner.clone(),
             deleted_tables: deleted_snapshot,
+            max_memtable_size: self.max_memtable_size,
         })
     }
 
@@ -444,6 +459,7 @@ impl TransactionalKVDB for FjallDB {
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
             global_deleted_tables: self.deleted_tables.clone(),
+            max_memtable_size: self.max_memtable_size,
         })
     }
 }

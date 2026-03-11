@@ -19,6 +19,104 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+/// Durability guarantee for redb write transactions.
+///
+/// Re-exported from `redb` for convenience so callers do not need to depend on
+/// the upstream crate directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedbDurability {
+    /// Do **not** flush to disk on commit.  Data may be lost on crash, but
+    /// throughput is much higher.
+    None,
+    /// Flush to disk on every commit.  Every committed transaction is
+    /// guaranteed to survive a crash.
+    Immediate,
+}
+
+impl From<RedbDurability> for Durability {
+    fn from(d: RedbDurability) -> Self {
+        match d {
+            RedbDurability::None => Durability::None,
+            RedbDurability::Immediate => Durability::Immediate,
+        }
+    }
+}
+
+/// Configuration for a [`RedbDB`] instance.
+///
+/// Use [`Default::default()`] for sensible defaults.  All sizes are in
+/// **bytes**.
+#[derive(Debug, Clone)]
+pub struct RedbConfig {
+    /// Total cache capacity (read + write).
+    ///
+    /// Default: **1 GiB** (redb upstream default).
+    pub cache_size: usize,
+
+    /// Durability guarantee for write transactions.
+    ///
+    /// **Durability:** [`RedbDurability::Immediate`] flushes every commit to
+    /// disk; [`RedbDurability::None`] defers flushing for higher throughput
+    /// at the cost of losing the most recent commits on crash.
+    ///
+    /// Default: [`RedbDurability::None`].
+    pub durability: RedbDurability,
+
+    /// Enable two-phase commit protocol.  Required for cross-database
+    /// consistency guarantees.
+    ///
+    /// Default: **false**.
+    pub two_phase_commit: bool,
+
+    /// Enable the quick-repair optimisation.  When `true`, redb can repair
+    /// a partially-committed transaction faster at the cost of slightly
+    /// increased write amplification.
+    ///
+    /// Default: **false**.
+    pub quick_repair: bool,
+}
+
+impl Default for RedbConfig {
+    fn default() -> Self {
+        Self {
+            cache_size: 1024 * 1024 * 1024,
+            durability: RedbDurability::None,
+            two_phase_commit: false,
+            quick_repair: false,
+        }
+    }
+}
+
+impl RedbConfig {
+    /// Sets the total cache capacity.
+    #[must_use]
+    pub fn cache_size(mut self, bytes: usize) -> Self {
+        self.cache_size = bytes;
+        self
+    }
+
+    /// Sets the durability guarantee for write transactions.
+    #[must_use]
+    pub fn durability(mut self, d: RedbDurability) -> Self {
+        self.durability = d;
+        self
+    }
+
+    /// Enables or disables two-phase commit.
+    #[must_use]
+    pub fn two_phase_commit(mut self, flag: bool) -> Self {
+        self.two_phase_commit = flag;
+        self
+    }
+
+    /// Enables or disables quick-repair.
+    #[must_use]
+    pub fn quick_repair(mut self, flag: bool) -> Self {
+        self.quick_repair = flag;
+        self
+    }
+}
+
 /// Key-value database backed by [redb](https://docs.rs/redb).
 ///
 /// Internally wraps a `redb::Database` behind an `Arc` so that cloning is
@@ -26,15 +124,31 @@ pub use self::transactional::{ReadTransaction, WriteTransaction};
 #[derive(Debug, Clone)]
 pub struct RedbDB {
     inner: Arc<Database>,
+    durability: RedbDurability,
+    two_phase_commit: bool,
+    quick_repair: bool,
 }
 
 impl RedbDB {
-    /// Opens (or creates) a redb database at the given filesystem `path`.
+    /// Opens (or creates) a redb database at the given filesystem `path`
+    /// using [`RedbConfig::default()`].
     pub fn open(path: &Path) -> io::Result<Self> {
-        let inner = Database::create(path).map_err(database_error_to_io_error)?;
+        Self::open_with_config(path, RedbConfig::default())
+    }
+
+    /// Opens (or creates) a redb database at `path` with custom
+    /// [`RedbConfig`].
+    pub fn open_with_config(path: &Path, config: RedbConfig) -> io::Result<Self> {
+        let mut builder = Database::builder();
+        builder.set_cache_size(config.cache_size);
+
+        let inner = builder.create(path).map_err(database_error_to_io_error)?;
 
         Ok(Self {
             inner: Arc::new(inner),
+            durability: config.durability,
+            two_phase_commit: config.two_phase_commit,
+            quick_repair: config.quick_repair,
         })
     }
 }
@@ -42,16 +156,25 @@ impl RedbDB {
 #[cfg(feature = "tokio")]
 crate::impl_async_kvdb_via_spawn_blocking!(RedbDB);
 
-impl KeyValueDB for RedbDB {
-    fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let mut write_transaction = self
+impl RedbDB {
+    /// Begins a write transaction configured with the stored durability,
+    /// two-phase-commit, and quick-repair settings.
+    fn begin_configured_write(&self) -> io::Result<redb::WriteTransaction> {
+        let mut tx = self
             .inner
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
-        write_transaction
-            .set_durability(Durability::Immediate)
+        tx.set_durability(self.durability.into())
             .map_err(io::Error::other)?;
-        write_transaction.set_quick_repair(true);
+        tx.set_two_phase_commit(self.two_phase_commit);
+        tx.set_quick_repair(self.quick_repair);
+        Ok(tx)
+    }
+}
+
+impl KeyValueDB for RedbDB {
+    fn insert(&self, table_name: &str, key: &str, value: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let write_transaction = self.begin_configured_write()?;
         let old_value = {
             let mut table = write_transaction
                 .open_table(TableDefinition::<&str, &[u8]>::new(table_name))
@@ -95,14 +218,7 @@ impl KeyValueDB for RedbDB {
     }
 
     fn remove(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let mut write_transaction = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        write_transaction
-            .set_durability(Durability::Immediate)
-            .map_err(io::Error::other)?;
-        write_transaction.set_quick_repair(true);
+        let write_transaction = self.begin_configured_write()?;
         let old_value = {
             let table_res =
                 write_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
@@ -179,14 +295,7 @@ impl KeyValueDB for RedbDB {
     }
 
     fn delete_table(&self, table_name: &str) -> io::Result<()> {
-        let mut write_transaction = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        write_transaction
-            .set_durability(Durability::Immediate)
-            .map_err(io::Error::other)?;
-        write_transaction.set_quick_repair(true);
+        let write_transaction = self.begin_configured_write()?;
         match write_transaction.delete_table(TableDefinition::<&str, &[u8]>::new(table_name)) {
             Ok(_) => {}
             Err(TableError::TableDoesNotExist(_)) => return Ok(()),
@@ -200,14 +309,7 @@ impl KeyValueDB for RedbDB {
     }
 
     fn clear(&self) -> Result<(), io::Error> {
-        let mut write_transaction = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        write_transaction
-            .set_durability(Durability::Immediate)
-            .map_err(io::Error::other)?;
-        write_transaction.set_quick_repair(true);
+        let write_transaction = self.begin_configured_write()?;
 
         for table_name in write_transaction
             .list_tables()

@@ -47,6 +47,27 @@ pub use self::transactional::{ReadTransaction, WriteTransaction};
 /// db.insert("table", "key", b"value").unwrap();
 /// assert_eq!(db.get("table", "key").unwrap(), Some(b"value".to_vec()));
 /// ```
+/// Configuration for an [`InMemoryDB`] instance.
+///
+/// Use [`Default::default()`] for a default configuration.
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryConfig {
+    /// Initial shard capacity hint for the underlying `DashMap`.
+    /// `None` lets `DashMap` choose its own default.
+    ///
+    /// Default: **None**.
+    pub initial_capacity: Option<usize>,
+}
+
+impl InMemoryConfig {
+    /// Sets the initial capacity hint.
+    #[must_use]
+    pub fn initial_capacity(mut self, n: usize) -> Self {
+        self.initial_capacity = Some(n);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryDB {
     map: Arc<DashMap<String, HashMap<String, Vec<u8>>>>,
@@ -58,6 +79,15 @@ impl InMemoryDB {
         Self {
             map: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Creates a new in-memory database with custom [`InMemoryConfig`].
+    pub fn new_with_config(config: InMemoryConfig) -> Self {
+        let map = match config.initial_capacity {
+            Some(cap) => DashMap::with_capacity(cap),
+            None => DashMap::new(),
+        };
+        Self { map: Arc::new(map) }
     }
 }
 

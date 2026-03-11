@@ -13,7 +13,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use fjall::{KeyspaceCreateOptions, Readable, SingleWriterTxDatabase};
+use fjall::{
+    CompressionType as FjallCompressionUpstream, KeyspaceCreateOptions, Readable,
+    SingleWriterTxDatabase,
+};
 
 use crate::KeyValueDB;
 
@@ -33,6 +36,191 @@ crate::impl_async_kvdb_via_spawn_blocking!(FjallDB);
 /// Marker keyspace that tracks which user keyspaces have been logically deleted.
 const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 
+/// Compression algorithm for fjall journal entries.
+///
+/// Journal entries larger than ~4 KiB are compressed with the chosen codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FjallCompression {
+    /// No compression.
+    None,
+    /// LZ4 — fast with moderate compression ratio (default).
+    Lz4,
+}
+
+impl From<FjallCompression> for FjallCompressionUpstream {
+    fn from(c: FjallCompression) -> Self {
+        match c {
+            FjallCompression::None => FjallCompressionUpstream::None,
+            FjallCompression::Lz4 => FjallCompressionUpstream::Lz4,
+        }
+    }
+}
+
+/// Configuration for a [`FjallDB`] instance.
+///
+/// Use [`Default::default()`] for sensible defaults tuned for multi-keyspace
+/// workloads.  All sizes are in **bytes**.
+///
+/// # Examples
+///
+/// ```no_run
+/// use keyvalue::fjall::{FjallDB, FjallConfig, FjallCompression};
+/// use std::path::Path;
+///
+/// let config = FjallConfig::default()
+///     .max_memtable_size(8 * 1024 * 1024)   // 8 MiB per keyspace
+///     .cache_size(64 * 1024 * 1024)          // 64 MiB block cache
+///     .journal_compression(FjallCompression::Lz4);
+///
+/// let db = FjallDB::open_with_config(Path::new("/tmp/mydb"), config).unwrap();
+/// ```
+#[derive(Debug, Clone)]
+pub struct FjallConfig {
+    // ── Per-keyspace options ─────────────────────────────────────
+    /// Maximum memtable size **per keyspace** before rotation triggers a
+    /// flush.  Lower values reduce peak memory at the cost of more frequent
+    /// I/O.
+    ///
+    /// Default: **64 MiB** (fjall upstream default).
+    pub max_memtable_size: u64,
+
+    // ── Database-level options ───────────────────────────────────
+    /// Block-cache capacity shared across all keyspaces.
+    /// Recommended to set to 20–25 % of available RAM.
+    ///
+    /// Default: **32 MiB** (fjall upstream default).
+    pub cache_size: u64,
+
+    /// Maximum total size of all write-ahead journals before the oldest ones
+    /// are evicted.  Similar to RocksDB `max_total_wal_size`.
+    ///
+    /// Must be ≥ 64 MiB.  Default: **512 MiB**.
+    pub max_journaling_size: u64,
+
+    /// Global cap on all active (unsealed) memtables across every keyspace.
+    /// `None` disables the limit.
+    ///
+    /// Default: **None** (disabled).
+    pub max_write_buffer_size: Option<u64>,
+
+    /// Number of background worker threads for flushes and compaction.
+    /// `None` uses upstream default: `min(available CPUs, 4)`.
+    ///
+    /// Default: **None** (auto).
+    pub worker_threads: Option<usize>,
+
+    /// Compression codec for large journal entries.
+    ///
+    /// Default: [`FjallCompression::Lz4`].
+    pub journal_compression: FjallCompression,
+
+    /// When `true`, the journal is **not** automatically flushed to disk
+    /// after each write batch.  The caller must manage persistence
+    /// (`Database::persist`) manually for batching.  When `false` (default),
+    /// every committed write batch is flushed to at least OS page-cache
+    /// buffers.
+    ///
+    /// **Durability:** Setting this to `true` trades durability for
+    /// throughput — committed data may be lost on application crash unless
+    /// the caller explicitly persists.
+    ///
+    /// Default: **false** (auto-persist after each write batch).
+    pub manual_journal_persist: bool,
+
+    /// Maximum number of file descriptors cached for open SST files.
+    /// `None` uses the platform default (900 Linux, 400 Windows, 150 macOS).
+    ///
+    /// Must be ≥ 10 if set.  Default: **None** (platform default).
+    pub max_cached_files: Option<usize>,
+
+    /// When `true`, the database directory is deleted when the `FjallDB`
+    /// handle is dropped.  Useful for temporary / test databases.
+    ///
+    /// Default: **false**.
+    pub temporary: bool,
+}
+
+impl Default for FjallConfig {
+    fn default() -> Self {
+        Self {
+            max_memtable_size: 64 * 1024 * 1024,
+            cache_size: 32 * 1024 * 1024,
+            max_journaling_size: 512 * 1024 * 1024,
+            max_write_buffer_size: None,
+            worker_threads: None,
+            journal_compression: FjallCompression::Lz4,
+            manual_journal_persist: false,
+            max_cached_files: None,
+            temporary: false,
+        }
+    }
+}
+
+impl FjallConfig {
+    /// Sets the per-keyspace memtable size.
+    #[must_use]
+    pub fn max_memtable_size(mut self, bytes: u64) -> Self {
+        self.max_memtable_size = bytes;
+        self
+    }
+
+    /// Sets the shared block-cache capacity.
+    #[must_use]
+    pub fn cache_size(mut self, bytes: u64) -> Self {
+        self.cache_size = bytes;
+        self
+    }
+
+    /// Sets the maximum total journal size.
+    #[must_use]
+    pub fn max_journaling_size(mut self, bytes: u64) -> Self {
+        self.max_journaling_size = bytes;
+        self
+    }
+
+    /// Sets the global write-buffer cap.
+    #[must_use]
+    pub fn max_write_buffer_size(mut self, bytes: Option<u64>) -> Self {
+        self.max_write_buffer_size = bytes;
+        self
+    }
+
+    /// Sets the number of background worker threads.
+    #[must_use]
+    pub fn worker_threads(mut self, n: usize) -> Self {
+        self.worker_threads = Some(n);
+        self
+    }
+
+    /// Sets the journal compression codec.
+    #[must_use]
+    pub fn journal_compression(mut self, c: FjallCompression) -> Self {
+        self.journal_compression = c;
+        self
+    }
+
+    /// Enables or disables manual journal persistence.
+    #[must_use]
+    pub fn manual_journal_persist(mut self, flag: bool) -> Self {
+        self.manual_journal_persist = flag;
+        self
+    }
+
+    /// Sets the maximum cached file descriptors.
+    #[must_use]
+    pub fn max_cached_files(mut self, n: usize) -> Self {
+        self.max_cached_files = Some(n);
+        self
+    }
+
+    /// Marks the database as temporary (deleted on drop).
+    #[must_use]
+    pub fn temporary(mut self, flag: bool) -> Self {
+        self.temporary = flag;
+        self
+    }
+}
+
 /// Key-value database backed by [fjall](https://docs.rs/fjall).
 ///
 /// Each table maps to a fjall *keyspace*. Deletion is soft: all entries are
@@ -42,17 +230,40 @@ const META_DELETED_KEYSPACE: &str = "_meta_deleted";
 pub struct FjallDB {
     inner: SingleWriterTxDatabase,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
+    max_memtable_size: u64,
 }
 
 impl FjallDB {
-    /// Opens (or creates) a fjall database at the given filesystem `path`.
-    ///
-    /// On startup the `_meta_deleted` keyspace is read to restore the set of
-    /// logically deleted tables.
+    /// Opens (or creates) a fjall database at the given filesystem `path`
+    /// using [`FjallConfig::default()`].
     pub fn open(path: &Path) -> io::Result<Self> {
-        let inner = SingleWriterTxDatabase::builder(path)
-            .open()
-            .map_err(io::Error::other)?;
+        Self::open_with_config(path, FjallConfig::default())
+    }
+
+    /// Opens (or creates) a fjall database at `path` with custom
+    /// [`FjallConfig`].
+    pub fn open_with_config(path: &Path, config: FjallConfig) -> io::Result<Self> {
+        let mut builder = SingleWriterTxDatabase::builder(path)
+            .cache_size(config.cache_size)
+            .max_journaling_size(config.max_journaling_size)
+            .journal_compression(config.journal_compression.into())
+            .manual_journal_persist(config.manual_journal_persist);
+
+        #[allow(deprecated)]
+        {
+            builder = builder.max_write_buffer_size(config.max_write_buffer_size);
+        }
+
+        let mut builder = builder.temporary(config.temporary);
+
+        if let Some(n) = config.worker_threads {
+            builder = builder.worker_threads(n);
+        }
+        if let Some(n) = config.max_cached_files {
+            builder = builder.max_cached_files(Some(n));
+        }
+
+        let inner = builder.open().map_err(io::Error::other)?;
 
         let deleted = Arc::new(RwLock::new(HashSet::new()));
 
@@ -75,7 +286,13 @@ impl FjallDB {
         Ok(Self {
             inner,
             deleted_tables: deleted,
+            max_memtable_size: config.max_memtable_size,
         })
+    }
+
+    /// Returns [`KeyspaceCreateOptions`] using the configured memtable size.
+    fn ks_options(&self) -> KeyspaceCreateOptions {
+        KeyspaceCreateOptions::default().max_memtable_size(self.max_memtable_size)
     }
 }
 
@@ -112,7 +329,7 @@ impl KeyValueDB for FjallDB {
         // Now proceed with the insert (keyspace will be created/opened automatically)
         let ks = self
             .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let key_bytes = key.as_bytes();
@@ -149,7 +366,7 @@ impl KeyValueDB for FjallDB {
 
         let ks = self
             .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         Ok(ks
@@ -178,7 +395,7 @@ impl KeyValueDB for FjallDB {
 
         let ks = self
             .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let key_bytes = key.as_bytes();
@@ -210,7 +427,7 @@ impl KeyValueDB for FjallDB {
 
         let ks = self
             .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let mut result = Vec::new();
@@ -264,7 +481,7 @@ impl KeyValueDB for FjallDB {
 
         let ks = self
             .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let mut result = Vec::new();
@@ -313,7 +530,7 @@ impl KeyValueDB for FjallDB {
 
         let ks = self
             .inner
-            .keyspace(table, KeyspaceCreateOptions::default)
+            .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         for item in write_tx.iter(&ks) {
@@ -373,7 +590,7 @@ impl KeyValueDB for FjallDB {
 
             let ks = self
                 .inner
-                .keyspace(table_name, KeyspaceCreateOptions::default)
+                .keyspace(table_name, || self.ks_options())
                 .map_err(io::Error::other)?;
 
             for item in write_tx.iter(&ks) {

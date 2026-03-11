@@ -21,6 +21,36 @@ mod client;
 
 use self::client::{HttpClientImpl, SleepImpl, TimeSourceImpl};
 
+/// Configuration for the AWS S3 backend.
+#[derive(Debug, Clone)]
+pub struct AwsS3Config {
+    /// S3 endpoint URL (e.g. `"http://localhost:9000"` for MinIO).
+    pub endpoint_url: String,
+    /// AWS region name.
+    pub region: String,
+    /// Access key / secret key pair.
+    pub credentials: Credentials,
+    /// Name of the bucket to use (created if absent).
+    pub bucket_name: String,
+}
+
+impl AwsS3Config {
+    /// Creates a new S3 configuration.
+    pub fn new(
+        endpoint_url: impl Into<String>,
+        region: impl Into<String>,
+        credentials: Credentials,
+        bucket_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint_url: endpoint_url.into(),
+            region: region.into(),
+            credentials,
+            bucket_name: bucket_name.into(),
+        }
+    }
+}
+
 /// Async key-value database backed by AWS S3 (or any S3-compatible service).
 ///
 /// Created via [`AwsS3DB::open`], which takes endpoint, region, credentials,
@@ -33,13 +63,17 @@ pub struct AwsS3DB {
 
 impl AwsS3DB {
     /// Connects to the S3-compatible service and ensures the bucket exists.
-    ///
-    /// # Arguments
-    ///
-    /// * `endpoint_url` — The S3 endpoint (e.g. `"http://localhost:9000"` for MinIO).
-    /// * `region` — AWS region name.
-    /// * `credentials` — Access key / secret key pair.
-    /// * `bucket_name` — Name of the bucket to use (created if absent).
+    pub async fn open_with_config(config: AwsS3Config) -> io::Result<Self> {
+        Self::open(
+            &config.endpoint_url,
+            &config.region,
+            config.credentials,
+            &config.bucket_name,
+        )
+        .await
+    }
+
+    /// Connects to the S3-compatible service and ensures the bucket exists.
     pub async fn open(
         endpoint_url: &str,
         region: &str,

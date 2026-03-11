@@ -73,6 +73,24 @@ enum CommandResponse {
     Error(std::io::Error),
 }
 
+/// Configuration for an [`IndexedDB`] instance.
+///
+/// Use [`Default`] is not provided because `db_name` is always required.
+#[derive(Debug, Clone)]
+pub struct IndexedDBConfig {
+    /// Database name passed to the browser IndexedDB API.
+    pub db_name: String,
+}
+
+impl IndexedDBConfig {
+    /// Creates a new config with the given database name.
+    pub fn new(db_name: impl Into<String>) -> Self {
+        Self {
+            db_name: db_name.into(),
+        }
+    }
+}
+
 /// Async key-value database backed by the browser's IndexedDB API (**WASM-only**).
 ///
 /// Internally runs a single-threaded event loop that serialises all
@@ -179,6 +197,11 @@ impl IndexedDB {
             task_handle,
             command_request_sender: command_sender,
         })
+    }
+
+    /// Opens an IndexedDB database with custom [`IndexedDBConfig`].
+    pub async fn open_with_config(config: IndexedDBConfig) -> io::Result<Self> {
+        Self::open(&config.db_name).await
     }
 }
 

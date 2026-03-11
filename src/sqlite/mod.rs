@@ -17,6 +17,331 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+/// SQLite journal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalMode {
+    /// Write-Ahead Logging — allows concurrent readers while writing.
+    Wal,
+    /// Classic rollback journal (SQLite default).
+    Delete,
+    /// Truncate journal file to zero length instead of deleting.
+    Truncate,
+    /// In-memory journal — faster but no crash recovery.
+    Memory,
+    /// Disable journaling entirely (no atomicity guarantees).
+    Off,
+}
+
+impl JournalMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Wal => "WAL",
+            Self::Delete => "DELETE",
+            Self::Truncate => "TRUNCATE",
+            Self::Memory => "MEMORY",
+            Self::Off => "OFF",
+        }
+    }
+}
+
+/// SQLite synchronous mode, controlling how aggressively data is flushed.
+///
+/// **Durability:** higher modes are safer but slower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynchronousMode {
+    /// No syncs at all.  A crash can corrupt the database.
+    Off,
+    /// Sync at the most critical moments.  A crash during a WAL checkpoint
+    /// may corrupt the database but an application crash cannot.
+    Normal,
+    /// Sync after every transaction commit.  Crash-safe.
+    Full,
+    /// Extra syncs beyond `Full` for additional paranoia.
+    Extra,
+}
+
+impl SynchronousMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Normal => "NORMAL",
+            Self::Full => "FULL",
+            Self::Extra => "EXTRA",
+        }
+    }
+}
+
+/// SQLite locking mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockingMode {
+    /// Normal locking.  Other processes can access the database.
+    Normal,
+    /// Exclusive locking.  Faster, but blocks all other connections.
+    Exclusive,
+}
+
+impl LockingMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "NORMAL",
+            Self::Exclusive => "EXCLUSIVE",
+        }
+    }
+}
+
+/// Where SQLite stores temporary tables and indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TempStore {
+    /// Use the compile-time default.
+    Default,
+    /// Store temporaries in a file.
+    File,
+    /// Store temporaries in memory.
+    Memory,
+}
+
+impl TempStore {
+    fn as_i32(self) -> i32 {
+        match self {
+            Self::Default => 0,
+            Self::File => 1,
+            Self::Memory => 2,
+        }
+    }
+}
+
+/// SQLite auto-vacuum mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoVacuum {
+    /// No auto-vacuum (default).  Database never shrinks.
+    None,
+    /// Full auto-vacuum.  Free pages are reclaimed after every transaction.
+    Full,
+    /// Incremental auto-vacuum.  Free pages are reclaimed in batches.
+    Incremental,
+}
+
+impl AutoVacuum {
+    fn as_i32(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::Full => 1,
+            Self::Incremental => 2,
+        }
+    }
+}
+
+/// Configuration for a [`SqliteDB`] instance.
+///
+/// Use [`Default::default()`] for sensible defaults (WAL mode, synchronous
+/// NORMAL).  Integer PRAGMA values use SQLite conventions (e.g. negative
+/// `cache_size` means KiB).
+#[derive(Debug, Clone)]
+pub struct SqliteConfig {
+    /// SQLite journal mode.
+    ///
+    /// Default: [`JournalMode::Wal`].
+    pub journal_mode: JournalMode,
+
+    /// Synchronous mode controlling fsync behaviour.
+    ///
+    /// **Durability:** `Full` or `Extra` guarantees every committed
+    /// transaction survives a power loss.  `Normal` may lose the last
+    /// transaction after a sudden power failure in WAL mode.  `Off` is
+    /// fastest but a crash can corrupt the database.
+    ///
+    /// Default: [`SynchronousMode::Normal`].
+    pub synchronous: SynchronousMode,
+
+    /// Page cache size.  Negative values are in KiB (e.g. `-2000` = 2000 KiB).
+    /// Positive values are in pages.
+    ///
+    /// Default: **None** (SQLite default, typically `-2000`).
+    pub cache_size: Option<i64>,
+
+    /// Busy timeout in milliseconds.  How long SQLite waits for a lock
+    /// before returning `SQLITE_BUSY`.
+    ///
+    /// Default: **5000** (5 seconds).
+    pub busy_timeout: u64,
+
+    /// Enforce foreign key constraints.
+    ///
+    /// Default: **false** (SQLite default).
+    pub foreign_keys: bool,
+
+    /// Maximum memory-mapped I/O size in bytes.  `0` disables mmap.
+    ///
+    /// **Note:** not supported by all turso/libsql builds.  Setting this on
+    /// an unsupported build will return an error at open time.
+    ///
+    /// Default: **None** (SQLite default, 0 = disabled).
+    pub mmap_size: Option<i64>,
+
+    /// Database page size in bytes.  Must be a power of two between 512
+    /// and 65536.  Can only be changed **before** any tables are created.
+    ///
+    /// Default: **None** (SQLite default, typically 4096).
+    pub page_size: Option<u32>,
+
+    /// Locking mode.
+    ///
+    /// **Note:** not supported by all turso/libsql builds.  Setting this on
+    /// an unsupported build will return an error at open time.
+    ///
+    /// Default: **None** (SQLite default, [`LockingMode::Normal`]).
+    pub locking_mode: Option<LockingMode>,
+
+    /// Where temporary tables and indices are stored.
+    ///
+    /// Default: **None** (SQLite default, [`TempStore::Default`]).
+    pub temp_store: Option<TempStore>,
+
+    /// Number of WAL pages before an automatic checkpoint.
+    /// `0` disables automatic checkpoints.
+    ///
+    /// **Note:** not supported by all turso/libsql builds.  Setting this on
+    /// an unsupported build will return an error at open time.
+    ///
+    /// Default: **None** (SQLite default, typically 1000).
+    pub wal_autocheckpoint: Option<i32>,
+
+    /// Auto-vacuum mode.  Can only be changed **before** any tables are
+    /// created (or by running `VACUUM`).
+    ///
+    /// Default: **None** (SQLite default, [`AutoVacuum::None`]).
+    pub auto_vacuum: Option<AutoVacuum>,
+
+    /// Maximum WAL journal size in bytes.  `-1` means no limit.
+    ///
+    /// **Note:** not supported by all turso/libsql builds.  Setting this on
+    /// an unsupported build will return an error at open time.
+    ///
+    /// Default: **None** (SQLite default, `-1`).
+    pub journal_size_limit: Option<i64>,
+
+    /// Overwrite deleted data with zeros for security.
+    ///
+    /// **Note:** not supported by all turso/libsql builds.  Setting this on
+    /// an unsupported build will return an error at open time.
+    ///
+    /// Default: **None** (disabled).
+    pub secure_delete: Option<bool>,
+}
+
+impl Default for SqliteConfig {
+    fn default() -> Self {
+        Self {
+            journal_mode: JournalMode::Wal,
+            synchronous: SynchronousMode::Normal,
+            cache_size: None,
+            busy_timeout: 5000,
+            foreign_keys: false,
+            mmap_size: None,
+            page_size: None,
+            locking_mode: None,
+            temp_store: None,
+            wal_autocheckpoint: None,
+            auto_vacuum: None,
+            journal_size_limit: None,
+            secure_delete: None,
+        }
+    }
+}
+
+impl SqliteConfig {
+    /// Sets the journal mode.
+    #[must_use]
+    pub fn journal_mode(mut self, mode: JournalMode) -> Self {
+        self.journal_mode = mode;
+        self
+    }
+
+    /// Sets the synchronous mode.
+    #[must_use]
+    pub fn synchronous(mut self, mode: SynchronousMode) -> Self {
+        self.synchronous = mode;
+        self
+    }
+
+    /// Sets the page cache size.
+    #[must_use]
+    pub fn cache_size(mut self, pages: i64) -> Self {
+        self.cache_size = Some(pages);
+        self
+    }
+
+    /// Sets the busy timeout in milliseconds.
+    #[must_use]
+    pub fn busy_timeout(mut self, ms: u64) -> Self {
+        self.busy_timeout = ms;
+        self
+    }
+
+    /// Enables or disables foreign key enforcement.
+    #[must_use]
+    pub fn foreign_keys(mut self, flag: bool) -> Self {
+        self.foreign_keys = flag;
+        self
+    }
+
+    /// Sets the mmap size in bytes.
+    #[must_use]
+    pub fn mmap_size(mut self, bytes: i64) -> Self {
+        self.mmap_size = Some(bytes);
+        self
+    }
+
+    /// Sets the database page size.
+    #[must_use]
+    pub fn page_size(mut self, bytes: u32) -> Self {
+        self.page_size = Some(bytes);
+        self
+    }
+
+    /// Sets the locking mode.
+    #[must_use]
+    pub fn locking_mode(mut self, mode: LockingMode) -> Self {
+        self.locking_mode = Some(mode);
+        self
+    }
+
+    /// Sets the temp-store location.
+    #[must_use]
+    pub fn temp_store(mut self, store: TempStore) -> Self {
+        self.temp_store = Some(store);
+        self
+    }
+
+    /// Sets the WAL autocheckpoint interval (pages).
+    #[must_use]
+    pub fn wal_autocheckpoint(mut self, pages: i32) -> Self {
+        self.wal_autocheckpoint = Some(pages);
+        self
+    }
+
+    /// Sets the auto-vacuum mode.
+    #[must_use]
+    pub fn auto_vacuum(mut self, mode: AutoVacuum) -> Self {
+        self.auto_vacuum = Some(mode);
+        self
+    }
+
+    /// Sets the journal size limit in bytes.
+    #[must_use]
+    pub fn journal_size_limit(mut self, bytes: i64) -> Self {
+        self.journal_size_limit = Some(bytes);
+        self
+    }
+
+    /// Enables or disables secure delete.
+    #[must_use]
+    pub fn secure_delete(mut self, flag: bool) -> Self {
+        self.secure_delete = Some(flag);
+        self
+    }
+}
+
 /// SQLite-backed async key-value database.
 ///
 /// Wraps a `turso::Connection` and `turso::Database`. The connection is shared
@@ -95,11 +420,15 @@ pub(crate) async fn ensure_table(conn: &Connection, table: &str) -> Result<(), i
 }
 
 impl SqliteDB {
-    /// Opens (or creates) a SQLite database at the given filesystem `path`.
-    ///
-    /// The connection is configured with `PRAGMA journal_mode=WAL` for
-    /// improved concurrent read throughput.
+    /// Opens (or creates) a SQLite database at the given filesystem `path`
+    /// using [`SqliteConfig::default()`].
     pub async fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_config(path, SqliteConfig::default()).await
+    }
+
+    /// Opens (or creates) a SQLite database at `path` with custom
+    /// [`SqliteConfig`].
+    pub async fn open_with_config(path: &Path, config: SqliteConfig) -> io::Result<Self> {
         let inner = Builder::new_local(
             path.to_str()
                 .ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"))?,
@@ -109,12 +438,81 @@ impl SqliteDB {
         .map_err(io::Error::other)?;
         let conn = inner.connect().map_err(io::Error::other)?;
 
-        // Enable WAL mode for concurrent read/write access
-        let mut wal_stmt = conn
-            .prepare("PRAGMA journal_mode=WAL")
-            .await
-            .map_err(io::Error::other)?;
-        wal_stmt.query(()).await.map_err(io::Error::other)?;
+        // Helper to execute a single PRAGMA statement.
+        async fn pragma(conn: &Connection, sql: &str) -> io::Result<()> {
+            let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
+            stmt.query(()).await.map_err(io::Error::other)?;
+            Ok(())
+        }
+
+        // Page size must be set before any table is created.
+        if let Some(ps) = config.page_size {
+            pragma(&conn, &format!("PRAGMA page_size={ps}")).await?;
+        }
+
+        // Auto-vacuum must be set before tables exist (or requires VACUUM).
+        if let Some(av) = config.auto_vacuum {
+            pragma(&conn, &format!("PRAGMA auto_vacuum={}", av.as_i32())).await?;
+        }
+
+        pragma(
+            &conn,
+            &format!("PRAGMA journal_mode={}", config.journal_mode.as_str()),
+        )
+        .await?;
+
+        pragma(
+            &conn,
+            &format!("PRAGMA synchronous={}", config.synchronous.as_str()),
+        )
+        .await?;
+
+        pragma(
+            &conn,
+            &format!("PRAGMA busy_timeout={}", config.busy_timeout),
+        )
+        .await?;
+
+        pragma(
+            &conn,
+            &format!(
+                "PRAGMA foreign_keys={}",
+                if config.foreign_keys { "ON" } else { "OFF" }
+            ),
+        )
+        .await?;
+
+        if let Some(sd) = config.secure_delete {
+            pragma(
+                &conn,
+                &format!("PRAGMA secure_delete={}", if sd { "ON" } else { "OFF" }),
+            )
+            .await?;
+        }
+
+        if let Some(cs) = config.cache_size {
+            pragma(&conn, &format!("PRAGMA cache_size={cs}")).await?;
+        }
+
+        if let Some(ms) = config.mmap_size {
+            pragma(&conn, &format!("PRAGMA mmap_size={ms}")).await?;
+        }
+
+        if let Some(lm) = config.locking_mode {
+            pragma(&conn, &format!("PRAGMA locking_mode={}", lm.as_str())).await?;
+        }
+
+        if let Some(ts) = config.temp_store {
+            pragma(&conn, &format!("PRAGMA temp_store={}", ts.as_i32())).await?;
+        }
+
+        if let Some(wac) = config.wal_autocheckpoint {
+            pragma(&conn, &format!("PRAGMA wal_autocheckpoint={wac}")).await?;
+        }
+
+        if let Some(jsl) = config.journal_size_limit {
+            pragma(&conn, &format!("PRAGMA journal_size_limit={jsl}")).await?;
+        }
 
         Ok(Self {
             db: Arc::new(inner),

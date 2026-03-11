@@ -1,8 +1,7 @@
 use std::io;
 
 use redb::{
-    Durability, ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError,
-    TableHandle,
+    ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError, TableHandle,
 };
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
@@ -228,9 +227,10 @@ impl TransactionalKVDB for RedbDB {
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
 
-        tx.set_durability(Durability::Immediate)
+        tx.set_durability(self.durability.into())
             .map_err(io::Error::other)?;
-        tx.set_quick_repair(true);
+        tx.set_two_phase_commit(self.two_phase_commit);
+        tx.set_quick_repair(self.quick_repair);
 
         Ok(WriteTransaction { tx })
     }

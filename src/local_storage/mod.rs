@@ -44,6 +44,24 @@ fn validate_name(kind: &str, name: &str) -> Result<(), io::Error> {
     Ok(())
 }
 
+/// Configuration for a [`LocalStorageDB`] instance.
+///
+/// Use [`Default::default()`] for sensible defaults.
+#[derive(Debug, Clone)]
+pub struct LocalStorageConfig {
+    /// Database name used as prefix for all `localStorage` keys.
+    pub db_name: String,
+}
+
+impl LocalStorageConfig {
+    /// Sets the database name prefix.
+    #[must_use]
+    pub fn db_name(mut self, name: impl Into<String>) -> Self {
+        self.db_name = name.into();
+        self
+    }
+}
+
 /// Browser `localStorage`-backed key-value database (**WASM-only**).
 ///
 /// Created via [`LocalStorageDB::open`].  Each instance is scoped to a
@@ -61,6 +79,13 @@ impl LocalStorageDB {
     pub fn open(db_name: &str) -> io::Result<Self> {
         Ok(Self {
             name: db_name.to_string(),
+        })
+    }
+
+    /// Opens a `LocalStorage`-backed store with custom [`LocalStorageConfig`].
+    pub fn open_with_config(config: LocalStorageConfig) -> io::Result<Self> {
+        Ok(Self {
+            name: config.db_name,
         })
     }
 }
