@@ -468,28 +468,8 @@ where
     async fn batch_commit(self, ops: Vec<WriteOp>) -> Result<(), io::Error> {
         tokio::task::spawn_blocking(move || {
             let mut guard = self.inner.lock().map_err(|_| mutex_poisoned())?;
-            let mut tx = guard.take().ok_or_else(tx_consumed)?;
-            for op in ops {
-                match op {
-                    WriteOp::Insert {
-                        table_name,
-                        key,
-                        value,
-                    } => {
-                        KVWriteTransaction::insert(&mut tx, &table_name, &key, &value)?;
-                    }
-                    WriteOp::Remove { table_name, key } => {
-                        KVWriteTransaction::remove(&mut tx, &table_name, &key)?;
-                    }
-                    WriteOp::DeleteTable { table_name } => {
-                        KVWriteTransaction::delete_table(&mut tx, &table_name)?;
-                    }
-                    WriteOp::Clear => {
-                        KVWriteTransaction::clear(&mut tx)?;
-                    }
-                }
-            }
-            KVWriteTransaction::commit(tx)
+            let tx = guard.take().ok_or_else(tx_consumed)?;
+            KVWriteTransaction::batch_commit(tx, ops)
         })
         .await
         .map_err(io::Error::other)?

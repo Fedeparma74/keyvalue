@@ -790,6 +790,66 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
         // Simply drop the transaction without committing
         Ok(())
     }
+
+    async fn batch_commit(mut self, ops: Vec<crate::transactional::WriteOp>) -> io::Result<()> {
+        use crate::transactional::WriteOp;
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    let table_name_clone = table_name.clone();
+                    let op = move |table: Rc<ObjectStore<Infallible>>| -> Pin<
+                        Box<
+                            dyn Future<
+                                Output = Result<Option<TableUpdate>, indexed_db::Error<Infallible>>,
+                            >,
+                        >,
+                    > {
+                        let table_name = table_name_clone.clone();
+                        let key = key.clone();
+                        let value = value.clone();
+                        Box::pin(async move {
+                            table
+                                .put_kv(&JsValue::from(key), &Uint8Array::from(value.as_ref()))
+                                .await?;
+                            Ok(Some(TableUpdate::Created(table_name)))
+                        })
+                    };
+                    self.operations.push((table_name, Arc::new(op)));
+                }
+                WriteOp::Remove { table_name, key } => {
+                    let op = move |table: Rc<ObjectStore<Infallible>>| -> Pin<
+                        Box<
+                            dyn Future<
+                                Output = Result<Option<TableUpdate>, indexed_db::Error<Infallible>>,
+                            >,
+                        >,
+                    > {
+                        let key = key.clone();
+                        Box::pin(async move {
+                            match table.delete(&JsValue::from(key)).await {
+                                Ok(()) => {}
+                                Err(indexed_db::Error::DoesNotExist) => {}
+                                Err(e) => return Err(e),
+                            }
+                            Ok(None)
+                        })
+                    };
+                    self.operations.push((table_name, Arc::new(op)));
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name).await?;
+                }
+                WriteOp::Clear => {
+                    self.clear().await?;
+                }
+            }
+        }
+        self.commit().await
+    }
 }
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]

@@ -430,6 +430,45 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     fn abort(self) -> Result<(), io::Error> {
         Ok(())
     }
+
+    fn batch_commit(
+        mut self,
+        ops: Vec<super::super::transactional::WriteOp>,
+    ) -> Result<(), io::Error> {
+        use super::super::transactional::WriteOp;
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    if self.tx_deleted_tables.contains(&table_name) {
+                        self.tx_deleted_tables.remove(&table_name);
+                    }
+                    self.pending
+                        .entry(table_name)
+                        .or_default()
+                        .insert(key, Some(value));
+                }
+                WriteOp::Remove { table_name, key } => {
+                    if !self.tx_deleted_tables.contains(&table_name) {
+                        self.pending
+                            .entry(table_name)
+                            .or_default()
+                            .insert(key, None);
+                    }
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name)?;
+                }
+                WriteOp::Clear => {
+                    self.clear()?;
+                }
+            }
+        }
+        self.commit()
+    }
 }
 
 impl TransactionalKVDB for FjallDB {

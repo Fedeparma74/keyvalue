@@ -207,6 +207,51 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
             Err(e) => Err(table_error_to_io_error(e)),
         }
     }
+
+    fn batch_commit(
+        mut self,
+        ops: Vec<super::super::transactional::WriteOp>,
+    ) -> Result<(), io::Error> {
+        use super::super::transactional::WriteOp;
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    let mut table = self
+                        .tx
+                        .open_table(TableDefinition::<&str, &[u8]>::new(&table_name))
+                        .map_err(table_error_to_io_error)?;
+                    let _ = table
+                        .insert(key.as_str(), value.as_slice())
+                        .map_err(storage_error_to_io_error)?;
+                }
+                WriteOp::Remove { table_name, key } => {
+                    match self
+                        .tx
+                        .open_table(TableDefinition::<&str, &[u8]>::new(&table_name))
+                    {
+                        Ok(mut table) => {
+                            let _ = table
+                                .remove(key.as_str())
+                                .map_err(storage_error_to_io_error)?;
+                        }
+                        Err(TableError::TableDoesNotExist(_)) => {}
+                        Err(e) => return Err(table_error_to_io_error(e)),
+                    }
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name)?;
+                }
+                WriteOp::Clear => {
+                    self.clear()?;
+                }
+            }
+        }
+        self.commit()
+    }
 }
 
 impl TransactionalKVDB for RedbDB {

@@ -299,6 +299,43 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
         Ok(())
     }
 
+    fn batch_commit(
+        mut self,
+        ops: Vec<super::super::transactional::WriteOp>,
+    ) -> Result<(), io::Error> {
+        use super::super::transactional::WriteOp;
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    self.deleted_tables.remove(&table_name);
+                    self.pending
+                        .entry(table_name)
+                        .or_default()
+                        .insert(key, Some(value));
+                }
+                WriteOp::Remove { table_name, key } => {
+                    if !self.deleted_tables.contains(&table_name) {
+                        self.pending
+                            .entry(table_name)
+                            .or_default()
+                            .insert(key, None);
+                    }
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name)?;
+                }
+                WriteOp::Clear => {
+                    self.clear()?;
+                }
+            }
+        }
+        self.commit()
+    }
+
     fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
         self.deleted_tables.insert(table_name.to_owned());
         // Clear any pending changes for this table.

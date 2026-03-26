@@ -6,6 +6,7 @@ use turso::Connection;
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
     sqlite::{ensure_table, table_exists, validate_table_name},
+    transactional::WriteOp,
 };
 
 use super::SqliteDB;
@@ -222,6 +223,47 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
             .await
             .map_err(io::Error::other)?;
         Ok(())
+    }
+
+    async fn batch_commit(mut self, ops: Vec<WriteOp>) -> Result<(), io::Error> {
+        for op in ops {
+            match op {
+                WriteOp::Insert {
+                    table_name,
+                    key,
+                    value,
+                } => {
+                    validate_table_name(&table_name)?;
+                    ensure_table(&self.conn, &table_name).await?;
+                    let sql = format!(
+                        "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
+                        table_name
+                    );
+                    self.conn
+                        .execute(sql.as_str(), (key.as_str(), value.as_slice()))
+                        .await
+                        .map_err(io::Error::other)?;
+                }
+                WriteOp::Remove { table_name, key } => {
+                    validate_table_name(&table_name)?;
+                    if !table_exists(&self.conn, &table_name).await? {
+                        continue;
+                    }
+                    let sql = format!("DELETE FROM \"{}\" WHERE key = ?", table_name);
+                    self.conn
+                        .execute(sql.as_str(), [key.as_str()])
+                        .await
+                        .map_err(io::Error::other)?;
+                }
+                WriteOp::DeleteTable { table_name } => {
+                    self.delete_table(&table_name).await?;
+                }
+                WriteOp::Clear => {
+                    self.clear().await?;
+                }
+            }
+        }
+        self.commit().await
     }
 }
 
