@@ -9,7 +9,7 @@
 use std::{
     collections::HashSet,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
@@ -228,7 +228,9 @@ impl FjallConfig {
 /// into a deleted keyspace transparently un-deletes it.
 #[derive(Clone)]
 pub struct FjallDB {
-    inner: SingleWriterTxDatabase,
+    inner: Arc<RwLock<SingleWriterTxDatabase>>,
+    path: Arc<PathBuf>,
+    config: Arc<FjallConfig>,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
     max_memtable_size: u64,
 }
@@ -243,6 +245,23 @@ impl FjallDB {
     /// Opens (or creates) a fjall database at `path` with custom
     /// [`FjallConfig`].
     pub fn open_with_config(path: &Path, config: FjallConfig) -> io::Result<Self> {
+        let inner = Self::build_database(path, &config)?;
+        let deleted = Arc::new(RwLock::new(HashSet::new()));
+
+        // Load persisted deleted tables
+        Self::load_deleted_tables(&inner, &deleted)?;
+
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+            path: Arc::new(path.to_path_buf()),
+            config: Arc::new(config.clone()),
+            deleted_tables: deleted,
+            max_memtable_size: config.max_memtable_size,
+        })
+    }
+
+    /// Builds a new `SingleWriterTxDatabase` from the given path and config.
+    fn build_database(path: &Path, config: &FjallConfig) -> io::Result<SingleWriterTxDatabase> {
         let mut builder = SingleWriterTxDatabase::builder(path)
             .cache_size(config.cache_size)
             .max_journaling_size(config.max_journaling_size)
@@ -263,11 +282,14 @@ impl FjallDB {
             builder = builder.max_cached_files(Some(n));
         }
 
-        let inner = builder.open().map_err(io::Error::other)?;
+        builder.open().map_err(io::Error::other)
+    }
 
-        let deleted = Arc::new(RwLock::new(HashSet::new()));
-
-        // Load persisted deleted tables
+    /// Loads persisted deleted-table markers from the internal `_meta_deleted` keyspace.
+    fn load_deleted_tables(
+        inner: &SingleWriterTxDatabase,
+        deleted: &Arc<RwLock<HashSet<String>>>,
+    ) -> io::Result<()> {
         if inner.keyspace_exists(META_DELETED_KEYSPACE) {
             let meta_ks = inner
                 .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
@@ -282,12 +304,52 @@ impl FjallDB {
                 deleted_tables.insert(table_name);
             }
         }
+        Ok(())
+    }
 
-        Ok(Self {
-            inner,
-            deleted_tables: deleted,
-            max_memtable_size: config.max_memtable_size,
-        })
+    /// Attempts to recover from a fjall `Poisoned` state by re-opening the
+    /// underlying database.
+    ///
+    /// When fjall encounters a hardware-level I/O failure (e.g. disk full)
+    /// during a flush or commit, it marks the database instance as *poisoned*
+    /// and refuses all future writes. This method drops the poisoned instance,
+    /// re-opens the database from the same path and config, and reloads the
+    /// deleted-table metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be re-opened (e.g. the
+    /// underlying hardware issue has not been resolved).
+    pub fn try_recover_from_poison(&self) -> io::Result<()> {
+        let mut inner_guard = self.inner.write().map_err(|_| lock_poisoned())?;
+
+        // Drop the old (poisoned) database and re-open
+        let new_db = Self::build_database(&self.path, &self.config)?;
+        *inner_guard = new_db;
+
+        // Reload deleted tables from the fresh database
+        let mut deleted = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
+        deleted.clear();
+        if inner_guard.keyspace_exists(META_DELETED_KEYSPACE) {
+            let meta_ks = inner_guard
+                .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
+                .map_err(io::Error::other)?;
+
+            let snapshot = inner_guard.read_tx();
+            for item in snapshot.iter(&meta_ks) {
+                let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
+                let table_name = String::from_utf8(key_bytes.to_vec())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                deleted.insert(table_name);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Acquires a read lock on the inner database.
+    fn inner(&self) -> io::Result<std::sync::RwLockReadGuard<'_, SingleWriterTxDatabase>> {
+        self.inner.read().map_err(|_| lock_poisoned())
     }
 
     /// Returns [`KeyspaceCreateOptions`] using the configured memtable size.
@@ -305,7 +367,9 @@ impl KeyValueDB for FjallDB {
             ));
         }
 
-        let mut write_tx = self.inner.write_tx();
+        let inner = self.inner()?;
+
+        let mut write_tx = inner.write_tx();
 
         let table_str = table.to_string();
 
@@ -318,8 +382,7 @@ impl KeyValueDB for FjallDB {
         if was_deleted {
             // "Recreate" the table: remove from deleted list (both memory and persistent meta)
             // Remove the deletion marker from _meta_deleted
-            let meta_ks = self
-                .inner
+            let meta_ks = inner
                 .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
                 .map_err(io::Error::other)?;
 
@@ -327,8 +390,7 @@ impl KeyValueDB for FjallDB {
         }
 
         // Now proceed with the insert (keyspace will be created/opened automatically)
-        let ks = self
-            .inner
+        let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
@@ -360,12 +422,13 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        if !self.inner.keyspace_exists(table) {
+        let inner = self.inner()?;
+
+        if !inner.keyspace_exists(table) {
             return Ok(None);
         }
 
-        let ks = self
-            .inner
+        let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
@@ -387,14 +450,15 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        if !self.inner.keyspace_exists(table) {
+        let inner = self.inner()?;
+
+        if !inner.keyspace_exists(table) {
             return Ok(None);
         }
 
-        let mut write_tx = self.inner.write_tx();
+        let mut write_tx = inner.write_tx();
 
-        let ks = self
-            .inner
+        let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
@@ -421,17 +485,18 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        if !self.inner.keyspace_exists(table) {
+        let inner = self.inner()?;
+
+        if !inner.keyspace_exists(table) {
             return Ok(Vec::new());
         }
 
-        let ks = self
-            .inner
+        let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let mut result = Vec::new();
-        let snapshot = self.inner.read_tx();
+        let snapshot = inner.read_tx();
         for item in snapshot.iter(&ks) {
             let (k, v) = item.into_inner().map_err(io::Error::other)?;
             let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
@@ -441,10 +506,10 @@ impl KeyValueDB for FjallDB {
     }
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        let inner = self.inner()?;
         // Exclude internal meta and deleted tables
         let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
-        let names = self
-            .inner
+        let names = inner
             .list_keyspace_names()
             .iter()
             .filter_map(|n| {
@@ -475,17 +540,18 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        if !self.inner.keyspace_exists(table) {
+        let inner = self.inner()?;
+
+        if !inner.keyspace_exists(table) {
             return Ok(Vec::new());
         }
 
-        let ks = self
-            .inner
+        let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
         let mut result = Vec::new();
-        let snapshot = self.inner.read_tx();
+        let snapshot = inner.read_tx();
         for item in snapshot.prefix(&ks, prefix.as_bytes()) {
             let (k, v) = item.into_inner().map_err(io::Error::other)?;
             let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
@@ -503,7 +569,8 @@ impl KeyValueDB for FjallDB {
         if deleted_tables.contains(table) {
             return Ok(false);
         }
-        Ok(self.inner.keyspace_exists(table))
+        let inner = self.inner()?;
+        Ok(inner.keyspace_exists(table))
     }
 
     fn delete_table(&self, table: &str) -> Result<(), io::Error> {
@@ -522,14 +589,15 @@ impl KeyValueDB for FjallDB {
             }
         }
 
-        let mut write_tx = self.inner.write_tx();
+        let inner = self.inner()?;
 
-        if !self.inner.keyspace_exists(table) {
+        let mut write_tx = inner.write_tx();
+
+        if !inner.keyspace_exists(table) {
             return Ok(());
         }
 
-        let ks = self
-            .inner
+        let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
 
@@ -538,8 +606,7 @@ impl KeyValueDB for FjallDB {
             write_tx.remove(&ks, key_bytes);
         }
 
-        let meta_ks = self
-            .inner
+        let meta_ks = inner
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
 
@@ -557,10 +624,11 @@ impl KeyValueDB for FjallDB {
     }
 
     fn clear(&self) -> Result<(), io::Error> {
+        let inner = self.inner()?;
         // Exclude internal meta and deleted tables
         let current_tables = {
             let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
-            self.inner
+            inner
                 .list_keyspace_names()
                 .iter()
                 .filter_map(|n| {
@@ -573,12 +641,11 @@ impl KeyValueDB for FjallDB {
                 .collect::<Vec<String>>()
         };
 
-        let meta_ks = self
-            .inner
+        let meta_ks = inner
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
 
-        let mut write_tx = self.inner.write_tx();
+        let mut write_tx = inner.write_tx();
 
         for table_name in &current_tables {
             if table_name == META_DELETED_KEYSPACE {
@@ -588,8 +655,7 @@ impl KeyValueDB for FjallDB {
                 ));
             }
 
-            let ks = self
-                .inner
+            let ks = inner
                 .keyspace(table_name, || self.ks_options())
                 .map_err(io::Error::other)?;
 

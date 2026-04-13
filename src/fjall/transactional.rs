@@ -476,6 +476,7 @@ impl TransactionalKVDB for FjallDB {
     type WriteTransaction<'a> = WriteTransaction;
 
     fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+        let inner = self.inner()?;
         // Clone the deleted_tables set to provide snapshot isolation.
         // This ensures concurrent writes don't affect this read transaction.
         let deleted_snapshot = self
@@ -484,22 +485,27 @@ impl TransactionalKVDB for FjallDB {
             .map_err(|_| lock_poisoned())?
             .clone();
         Ok(ReadTransaction {
-            snapshot: self.inner.read_tx(),
-            db: self.inner.clone(),
+            snapshot: inner.read_tx(),
+            db: inner.clone(),
             deleted_tables: deleted_snapshot,
             max_memtable_size: self.max_memtable_size,
         })
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+        let inner = self.inner()?;
         Ok(WriteTransaction {
-            db: self.inner.clone(),
-            snapshot: self.inner.read_tx(),
+            db: inner.clone(),
+            snapshot: inner.read_tx(),
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
             global_deleted_tables: self.deleted_tables.clone(),
             max_memtable_size: self.max_memtable_size,
         })
+    }
+
+    fn try_recover(&self) -> Result<(), io::Error> {
+        self.try_recover_from_poison()
     }
 }
 
@@ -544,6 +550,13 @@ mod async_impl {
             })
             .await
             .map_err(std::io::Error::other)?
+        }
+
+        async fn try_recover(&self) -> Result<(), std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || crate::TransactionalKVDB::try_recover(&db))
+                .await
+                .map_err(std::io::Error::other)?
         }
     }
 }

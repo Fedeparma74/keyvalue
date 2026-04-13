@@ -6,7 +6,11 @@
 //! via `spawn_blocking`). The optional `transactional` feature adds
 //! [`TransactionalKVDB`](crate::TransactionalKVDB) support.
 
-use std::{io, path::Path, sync::Arc};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
 
 use ::redb::{CommitError, Database, DatabaseError, StorageError, TableError, TransactionError};
 use redb::{Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
@@ -123,10 +127,13 @@ impl RedbConfig {
 /// cheap and the handle can be shared across threads.
 #[derive(Debug, Clone)]
 pub struct RedbDB {
-    inner: Arc<Database>,
-    durability: RedbDurability,
-    two_phase_commit: bool,
-    quick_repair: bool,
+    inner: Arc<RwLock<Database>>,
+    path: Arc<PathBuf>,
+    config: Arc<RedbConfig>,
+}
+
+fn lock_poisoned() -> io::Error {
+    io::Error::other("RwLock poisoned")
 }
 
 impl RedbDB {
@@ -139,17 +146,33 @@ impl RedbDB {
     /// Opens (or creates) a redb database at `path` with custom
     /// [`RedbConfig`].
     pub fn open_with_config(path: &Path, config: RedbConfig) -> io::Result<Self> {
-        let mut builder = Database::builder();
-        builder.set_cache_size(config.cache_size);
-
-        let inner = builder.create(path).map_err(database_error_to_io_error)?;
+        let inner = Self::build_database(path, &config)?;
 
         Ok(Self {
-            inner: Arc::new(inner),
-            durability: config.durability,
-            two_phase_commit: config.two_phase_commit,
-            quick_repair: config.quick_repair,
+            inner: Arc::new(RwLock::new(inner)),
+            path: Arc::new(path.to_path_buf()),
+            config: Arc::new(config),
         })
+    }
+
+    /// Builds a new `Database` from the given path and config.
+    fn build_database(path: &Path, config: &RedbConfig) -> io::Result<Database> {
+        let mut builder = Database::builder();
+        builder.set_cache_size(config.cache_size);
+        builder.create(path).map_err(database_error_to_io_error)
+    }
+
+    /// Attempts to recover the database by re-opening it from disk.
+    pub fn try_recover_from_error(&self) -> io::Result<()> {
+        let mut inner_guard = self.inner.write().map_err(|_| lock_poisoned())?;
+        let new_db = Self::build_database(&self.path, &self.config)?;
+        *inner_guard = new_db;
+        Ok(())
+    }
+
+    /// Acquires a read lock on the inner database.
+    fn inner(&self) -> io::Result<std::sync::RwLockReadGuard<'_, Database>> {
+        self.inner.read().map_err(|_| lock_poisoned())
     }
 }
 
@@ -160,14 +183,12 @@ impl RedbDB {
     /// Begins a write transaction configured with the stored durability,
     /// two-phase-commit, and quick-repair settings.
     fn begin_configured_write(&self) -> io::Result<redb::WriteTransaction> {
-        let mut tx = self
-            .inner
-            .begin_write()
-            .map_err(transaction_error_to_io_error)?;
-        tx.set_durability(self.durability.into())
+        let inner = self.inner()?;
+        let mut tx = inner.begin_write().map_err(transaction_error_to_io_error)?;
+        tx.set_durability(self.config.durability.into())
             .map_err(io::Error::other)?;
-        tx.set_two_phase_commit(self.two_phase_commit);
-        tx.set_quick_repair(self.quick_repair);
+        tx.set_two_phase_commit(self.config.two_phase_commit);
+        tx.set_quick_repair(self.config.quick_repair);
         Ok(tx)
     }
 }
@@ -194,7 +215,7 @@ impl KeyValueDB for RedbDB {
 
     fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let read_transaction = self
-            .inner
+            .inner()?
             .begin_read()
             .map_err(transaction_error_to_io_error)?;
         let value = {
@@ -253,7 +274,7 @@ impl KeyValueDB for RedbDB {
 
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
         let read_transaction = self
-            .inner
+            .inner()?
             .begin_read()
             .map_err(transaction_error_to_io_error)?;
         let table_res =
@@ -275,7 +296,7 @@ impl KeyValueDB for RedbDB {
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
         let read_transaction = self
-            .inner
+            .inner()?
             .begin_read()
             .map_err(transaction_error_to_io_error)?;
         let mut result = Vec::new();

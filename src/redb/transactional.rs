@@ -260,7 +260,7 @@ impl TransactionalKVDB for RedbDB {
 
     fn begin_read(&self) -> io::Result<Self::ReadTransaction<'_>> {
         let tx = self
-            .inner
+            .inner()?
             .begin_read()
             .map_err(transaction_error_to_io_error)?;
         Ok(ReadTransaction { tx })
@@ -268,16 +268,20 @@ impl TransactionalKVDB for RedbDB {
 
     fn begin_write(&self) -> io::Result<Self::WriteTransaction<'_>> {
         let mut tx = self
-            .inner
+            .inner()?
             .begin_write()
             .map_err(transaction_error_to_io_error)?;
 
-        tx.set_durability(self.durability.into())
+        tx.set_durability(self.config.durability.into())
             .map_err(io::Error::other)?;
-        tx.set_two_phase_commit(self.two_phase_commit);
-        tx.set_quick_repair(self.quick_repair);
+        tx.set_two_phase_commit(self.config.two_phase_commit);
+        tx.set_quick_repair(self.config.quick_repair);
 
         Ok(WriteTransaction { tx })
+    }
+
+    fn try_recover(&self) -> io::Result<()> {
+        self.try_recover_from_error()
     }
 }
 
@@ -322,6 +326,13 @@ mod async_impl {
             })
             .await
             .map_err(std::io::Error::other)?
+        }
+
+        async fn try_recover(&self) -> Result<(), std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || crate::TransactionalKVDB::try_recover(&db))
+                .await
+                .map_err(std::io::Error::other)?
         }
     }
 }

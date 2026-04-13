@@ -872,4 +872,8 @@ impl AsyncTransactionalKVDB for IndexedDB {
             operations: Vec::new(),
         })
     }
+
+    async fn try_recover(&self) -> io::Result<()> {
+        self.try_recover_from_error().await
+    }
 }

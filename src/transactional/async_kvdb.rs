@@ -22,6 +22,14 @@ pub trait AsyncTransactionalKVDB: MaybeSendSync + 'static {
 
     async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error>;
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
+
+    /// Attempts to recover the database from an unrecoverable internal state.
+    ///
+    /// The default implementation is a no-op. Backends that support runtime
+    /// recovery should override this.
+    async fn try_recover(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
 }
 
 /// Read-only half of an async transaction.  See [`AsyncTransactionalKVDB`].

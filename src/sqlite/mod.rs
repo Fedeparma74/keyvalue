@@ -6,7 +6,11 @@
 //! **Note:** This backend only implements [`AsyncKeyValueDB`](crate::AsyncKeyValueDB)
 //! because the underlying `turso` driver is async.
 
-use std::{io, path::Path, sync::Arc};
+use std::{
+    io,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 use turso::{Builder, Connection, Database, params};
@@ -346,10 +350,19 @@ impl SqliteConfig {
 ///
 /// Wraps a `turso::Connection` and `turso::Database`. The connection is shared
 /// via `Arc` so the struct can be passed across async tasks.
-#[derive(Debug)]
 pub struct SqliteDB {
-    conn: Arc<Connection>,
+    conn: RwLock<Arc<Connection>>,
     db: Arc<Database>,
+    path: String,
+    config: SqliteConfig,
+}
+
+impl std::fmt::Debug for SqliteDB {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteDB")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Validates that a table name is a safe SQL identifier.
@@ -420,61 +433,53 @@ pub(crate) async fn ensure_table(conn: &Connection, table: &str) -> Result<(), i
 }
 
 impl SqliteDB {
-    /// Opens (or creates) a SQLite database at the given filesystem `path`
-    /// using [`SqliteConfig::default()`].
-    pub async fn open(path: &Path) -> io::Result<Self> {
-        Self::open_with_config(path, SqliteConfig::default()).await
+    fn lock_poisoned() -> io::Error {
+        io::Error::other("SqliteDB lock poisoned")
     }
 
-    /// Opens (or creates) a SQLite database at `path` with custom
-    /// [`SqliteConfig`].
-    pub async fn open_with_config(path: &Path, config: SqliteConfig) -> io::Result<Self> {
-        let inner = Builder::new_local(
-            path.to_str()
-                .ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"))?,
-        )
-        .build()
-        .await
-        .map_err(io::Error::other)?;
-        let conn = inner.connect().map_err(io::Error::other)?;
+    fn conn(&self) -> io::Result<Arc<Connection>> {
+        Ok(self.conn.read().map_err(|_| Self::lock_poisoned())?.clone())
+    }
 
-        // Helper to execute a single PRAGMA statement.
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
+    }
+
+    async fn apply_pragmas(conn: &Connection, config: &SqliteConfig) -> io::Result<()> {
         async fn pragma(conn: &Connection, sql: &str) -> io::Result<()> {
             let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
             stmt.query(()).await.map_err(io::Error::other)?;
             Ok(())
         }
 
-        // Page size must be set before any table is created.
         if let Some(ps) = config.page_size {
-            pragma(&conn, &format!("PRAGMA page_size={ps}")).await?;
+            pragma(conn, &format!("PRAGMA page_size={ps}")).await?;
         }
 
-        // Auto-vacuum must be set before tables exist (or requires VACUUM).
         if let Some(av) = config.auto_vacuum {
-            pragma(&conn, &format!("PRAGMA auto_vacuum={}", av.as_i32())).await?;
+            pragma(conn, &format!("PRAGMA auto_vacuum={}", av.as_i32())).await?;
         }
 
         pragma(
-            &conn,
+            conn,
             &format!("PRAGMA journal_mode={}", config.journal_mode.as_str()),
         )
         .await?;
 
         pragma(
-            &conn,
+            conn,
             &format!("PRAGMA synchronous={}", config.synchronous.as_str()),
         )
         .await?;
 
         pragma(
-            &conn,
+            conn,
             &format!("PRAGMA busy_timeout={}", config.busy_timeout),
         )
         .await?;
 
         pragma(
-            &conn,
+            conn,
             &format!(
                 "PRAGMA foreign_keys={}",
                 if config.foreign_keys { "ON" } else { "OFF" }
@@ -484,39 +489,75 @@ impl SqliteDB {
 
         if let Some(sd) = config.secure_delete {
             pragma(
-                &conn,
+                conn,
                 &format!("PRAGMA secure_delete={}", if sd { "ON" } else { "OFF" }),
             )
             .await?;
         }
 
         if let Some(cs) = config.cache_size {
-            pragma(&conn, &format!("PRAGMA cache_size={cs}")).await?;
+            pragma(conn, &format!("PRAGMA cache_size={cs}")).await?;
         }
 
         if let Some(ms) = config.mmap_size {
-            pragma(&conn, &format!("PRAGMA mmap_size={ms}")).await?;
+            pragma(conn, &format!("PRAGMA mmap_size={ms}")).await?;
         }
 
         if let Some(lm) = config.locking_mode {
-            pragma(&conn, &format!("PRAGMA locking_mode={}", lm.as_str())).await?;
+            pragma(conn, &format!("PRAGMA locking_mode={}", lm.as_str())).await?;
         }
 
         if let Some(ts) = config.temp_store {
-            pragma(&conn, &format!("PRAGMA temp_store={}", ts.as_i32())).await?;
+            pragma(conn, &format!("PRAGMA temp_store={}", ts.as_i32())).await?;
         }
 
         if let Some(wac) = config.wal_autocheckpoint {
-            pragma(&conn, &format!("PRAGMA wal_autocheckpoint={wac}")).await?;
+            pragma(conn, &format!("PRAGMA wal_autocheckpoint={wac}")).await?;
         }
 
         if let Some(jsl) = config.journal_size_limit {
-            pragma(&conn, &format!("PRAGMA journal_size_limit={jsl}")).await?;
+            pragma(conn, &format!("PRAGMA journal_size_limit={jsl}")).await?;
         }
 
+        Ok(())
+    }
+
+    /// Attempt to recover from an unrecoverable database error by
+    /// creating a new connection and re-applying pragmas.
+    pub async fn try_recover_from_error(&self) -> io::Result<()> {
+        let new_conn = self.db.connect().map_err(io::Error::other)?;
+        Self::apply_pragmas(&new_conn, &self.config).await?;
+        let mut guard = self.conn.write().map_err(|_| Self::lock_poisoned())?;
+        *guard = Arc::new(new_conn);
+        Ok(())
+    }
+
+    /// Opens (or creates) a SQLite database at the given filesystem `path`
+    /// using [`SqliteConfig::default()`].
+    pub async fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_config(path, SqliteConfig::default()).await
+    }
+
+    /// Opens (or creates) a SQLite database at `path` with custom
+    /// [`SqliteConfig`].
+    pub async fn open_with_config(path: &Path, config: SqliteConfig) -> io::Result<Self> {
+        let path_str = path
+            .to_str()
+            .ok_or(io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"))?
+            .to_string();
+        let inner = Builder::new_local(&path_str)
+            .build()
+            .await
+            .map_err(io::Error::other)?;
+        let conn = inner.connect().map_err(io::Error::other)?;
+
+        Self::apply_pragmas(&conn, &config).await?;
+
         Ok(Self {
+            conn: RwLock::new(Arc::new(conn)),
             db: Arc::new(inner),
-            conn: Arc::new(conn),
+            path: path_str,
+            config,
         })
     }
 }
@@ -531,19 +572,18 @@ impl AsyncKeyValueDB for SqliteDB {
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, io::Error> {
         validate_table_name(table)?;
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let conn = self.conn()?;
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         let result = async {
-            ensure_table(&self.conn, table).await?;
+            ensure_table(&conn, table).await?;
             let old = self.get(table, key).await?;
             let sql = format!(
                 "INSERT OR REPLACE INTO \"{}\" (key, value) VALUES (?, ?)",
                 table
             );
-            self.conn
-                .execute(&sql, params![key, value])
+            conn.execute(&sql, params![key, value])
                 .await
                 .map_err(io::Error::other)?;
             Ok(old)
@@ -551,14 +591,11 @@ impl AsyncKeyValueDB for SqliteDB {
         .await;
         match result {
             Ok(old) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(io::Error::other)?;
+                conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
                 Ok(old)
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = conn.execute("ROLLBACK", ()).await;
                 Err(e)
             }
         }
@@ -566,11 +603,12 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         validate_table_name(table)?;
-        if !table_exists(&self.conn, table).await? {
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
             return Ok(None);
         }
         let sql = format!("SELECT value FROM \"{}\" WHERE key = ?", table);
-        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([key]).await.map_err(io::Error::other)?;
         if let Some(row) = rows.next().await.map_err(io::Error::other)? {
             let blob: Vec<u8> = row.get(0).map_err(io::Error::other)?;
@@ -582,33 +620,27 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn remove(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         validate_table_name(table)?;
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let conn = self.conn()?;
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         let result = async {
-            if !table_exists(&self.conn, table).await? {
+            if !table_exists(&conn, table).await? {
                 return Ok(None);
             }
             let old = self.get(table, key).await?;
             let sql = format!("DELETE FROM \"{}\" WHERE key = ?", table);
-            self.conn
-                .execute(&sql, [key])
-                .await
-                .map_err(io::Error::other)?;
+            conn.execute(&sql, [key]).await.map_err(io::Error::other)?;
             Ok(old)
         }
         .await;
         match result {
             Ok(old) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(io::Error::other)?;
+                conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
                 Ok(old)
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = conn.execute("ROLLBACK", ()).await;
                 Err(e)
             }
         }
@@ -616,11 +648,12 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn iter(&self, table: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         validate_table_name(table)?;
-        if !table_exists(&self.conn, table).await? {
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!("SELECT key, value FROM \"{}\"", table);
-        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -632,8 +665,9 @@ impl AsyncKeyValueDB for SqliteDB {
     }
 
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
+        let conn = self.conn()?;
         let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
-        let mut stmt = self.conn.prepare(sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -649,7 +683,8 @@ impl AsyncKeyValueDB for SqliteDB {
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         validate_table_name(table)?;
-        if !table_exists(&self.conn, table).await? {
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
         let escaped = escape_like(prefix);
@@ -658,7 +693,7 @@ impl AsyncKeyValueDB for SqliteDB {
             "SELECT key, value FROM \"{}\" WHERE key LIKE ? ESCAPE '\\'",
             table
         );
-        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt
             .query([like_pattern.as_str()])
             .await
@@ -674,16 +709,18 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
         validate_table_name(table)?;
-        table_exists(&self.conn, table).await
+        let conn = self.conn()?;
+        table_exists(&conn, table).await
     }
 
     async fn contains_key(&self, table: &str, key: &str) -> Result<bool, io::Error> {
         validate_table_name(table)?;
-        if !table_exists(&self.conn, table).await? {
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
             return Ok(false);
         }
         let sql = format!("SELECT EXISTS (SELECT 1 FROM \"{}\" WHERE key = ?)", table);
-        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query([key]).await.map_err(io::Error::other)?;
         if let Some(row) = rows.next().await.map_err(io::Error::other)? {
             let exists: i64 = row.get(0).map_err(io::Error::other)?;
@@ -695,11 +732,12 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn keys(&self, table: &str) -> Result<Vec<String>, io::Error> {
         validate_table_name(table)?;
-        if !table_exists(&self.conn, table).await? {
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!("SELECT key FROM \"{}\"", table);
-        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut keys = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -711,11 +749,12 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn values(&self, table: &str) -> Result<Vec<Vec<u8>>, io::Error> {
         validate_table_name(table)?;
-        if !table_exists(&self.conn, table).await? {
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
             return Ok(Vec::new());
         }
         let sql = format!("SELECT value FROM \"{}\"", table);
-        let mut stmt = self.conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt.query(()).await.map_err(io::Error::other)?;
         let mut values = Vec::new();
         while let Some(row) = rows.next().await.map_err(io::Error::other)? {
@@ -727,63 +766,51 @@ impl AsyncKeyValueDB for SqliteDB {
 
     async fn delete_table(&self, table: &str) -> Result<(), io::Error> {
         validate_table_name(table)?;
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let conn = self.conn()?;
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         let result = async {
-            if table_exists(&self.conn, table).await? {
+            if table_exists(&conn, table).await? {
                 let sql = format!("DROP TABLE \"{}\"", table);
-                self.conn
-                    .execute(&sql, ())
-                    .await
-                    .map_err(io::Error::other)?;
+                conn.execute(&sql, ()).await.map_err(io::Error::other)?;
             }
             Ok(())
         }
         .await;
         match result {
             Ok(()) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(io::Error::other)?;
+                conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = conn.execute("ROLLBACK", ()).await;
                 Err(e)
             }
         }
     }
 
     async fn clear(&self) -> Result<(), io::Error> {
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let conn = self.conn()?;
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
         let result = async {
             let tables = self.table_names().await?;
             for t in tables {
                 let sql = format!("DROP TABLE \"{}\"", t);
-                self.conn
-                    .execute(&sql, ())
-                    .await
-                    .map_err(io::Error::other)?;
+                conn.execute(&sql, ()).await.map_err(io::Error::other)?;
             }
             Ok(())
         }
         .await;
         match result {
             Ok(()) => {
-                self.conn
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(io::Error::other)?;
+                conn.execute("COMMIT", ()).await.map_err(io::Error::other)?;
                 Ok(())
             }
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = conn.execute("ROLLBACK", ()).await;
                 Err(e)
             }
         }

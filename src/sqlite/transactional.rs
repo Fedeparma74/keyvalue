@@ -275,7 +275,7 @@ impl AsyncTransactionalKVDB for SqliteDB {
     async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
         // Open a separate connection for read isolation.
         // With WAL mode, BEGIN DEFERRED gives us a snapshot as of the first read.
-        let read_conn = self.db.connect().map_err(io::Error::other)?;
+        let read_conn = self.db().connect().map_err(io::Error::other)?;
         read_conn
             .execute("BEGIN DEFERRED", ())
             .await
@@ -283,12 +283,14 @@ impl AsyncTransactionalKVDB for SqliteDB {
         Ok(ReadTransaction { conn: read_conn })
     }
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let conn = self.conn()?;
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
-        Ok(WriteTransaction {
-            conn: self.conn.clone(),
-        })
+        Ok(WriteTransaction { conn })
+    }
+
+    async fn try_recover(&self) -> Result<(), io::Error> {
+        self.try_recover_from_error().await
     }
 }

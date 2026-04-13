@@ -70,6 +70,7 @@ enum CommandResponse {
     Values(Vec<Vec<u8>>),
     Clear,
     Commit,
+    Recover,
     Error(std::io::Error),
 }
 
@@ -202,6 +203,49 @@ impl IndexedDB {
     /// Opens an IndexedDB database with custom [`IndexedDBConfig`].
     pub async fn open_with_config(config: IndexedDBConfig) -> io::Result<Self> {
         Self::open(&config.db_name).await
+    }
+
+    /// Attempt to recover from an unrecoverable database error by
+    /// closing the current connection and re-opening from the browser.
+    pub async fn try_recover_from_error(&self) -> io::Result<()> {
+        let name = self.name.clone();
+        let version = self.version.clone();
+
+        let recover_closure = move |db: Rc<RwLock<Database>>| {
+            async move {
+                let mut db_guard = db.write().await;
+                db_guard.close();
+
+                let new_db = Factory::get()
+                    .map_err(indexed_db_error_to_io_error)?
+                    .open_latest_version(&name)
+                    .await
+                    .map_err(indexed_db_error_to_io_error)?;
+
+                let db_version = new_db.version();
+                version.store(db_version, std::sync::atomic::Ordering::SeqCst);
+
+                *db_guard = new_db;
+
+                Ok::<_, std::io::Error>(CommandResponse::Recover)
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(recover_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send recovery command"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive recovery response"))?;
+
+        match response {
+            CommandResponse::Recover => Ok(()),
+            CommandResponse::Error(e) => Err(e),
+            _ => Err(io::Error::other("Unexpected response type")),
+        }
     }
 }
 

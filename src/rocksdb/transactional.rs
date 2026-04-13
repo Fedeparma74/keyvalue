@@ -466,7 +466,7 @@ impl TransactionalKVDB for RocksDB {
     type WriteTransaction<'a> = WriteTransaction;
 
     fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
-        let db = self.inner.clone();
+        let db = self.inner()?;
         let snapshot = new_owned_snapshot(&db);
         Ok(ReadTransaction {
             db,
@@ -477,7 +477,7 @@ impl TransactionalKVDB for RocksDB {
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
-        let db = self.inner.clone();
+        let db = self.inner()?;
         let snapshot = new_owned_snapshot(&db);
         Ok(WriteTransaction {
             db,
@@ -487,6 +487,10 @@ impl TransactionalKVDB for RocksDB {
             path: self.path.clone(),
             opts: self.opts.clone(),
         })
+    }
+
+    fn try_recover(&self) -> io::Result<()> {
+        self.try_recover_from_error()
     }
 }
 
@@ -531,6 +535,13 @@ mod async_impl {
             })
             .await
             .map_err(std::io::Error::other)?
+        }
+
+        async fn try_recover(&self) -> Result<(), std::io::Error> {
+            let db = self.clone();
+            tokio::task::spawn_blocking(move || crate::TransactionalKVDB::try_recover(&db))
+                .await
+                .map_err(std::io::Error::other)?
         }
     }
 }

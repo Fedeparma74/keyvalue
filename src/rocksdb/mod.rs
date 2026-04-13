@@ -3,7 +3,11 @@
 //! Tables are mapped to RocksDB **column families**. The `default` column
 //! family is reserved by RocksDB itself and cannot be used as a table name.
 
-use std::{io, path::Path, sync::Arc};
+use std::{
+    io,
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use rust_rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
@@ -687,7 +691,7 @@ impl RocksDBConfig {
 /// The handle is wrapped in an `Arc` for cheap cloning.
 #[derive(Clone)]
 pub struct RocksDB {
-    inner: Arc<Rocks>,
+    inner: Arc<RwLock<Arc<Rocks>>>,
     path: String,
     opts: Arc<Options>,
     write_opts: Option<Arc<WriteOptions>>,
@@ -699,6 +703,33 @@ crate::impl_async_kvdb_via_spawn_blocking!(RocksDB);
 const DEFAULT_CPU_CORES: usize = 4;
 
 impl RocksDB {
+    fn lock_poisoned() -> io::Error {
+        io::Error::other("RocksDB lock poisoned")
+    }
+
+    fn build_database(path: &str, opts: &Options) -> io::Result<Rocks> {
+        let cfs = Rocks::list_cf(opts, path).unwrap_or_default();
+        let descriptors = cfs
+            .iter()
+            .map(|cf| ColumnFamilyDescriptor::new(cf, opts.clone()))
+            .collect::<Vec<_>>();
+        Rocks::open_cf_descriptors(opts, path, descriptors).map_err(io::Error::other)
+    }
+
+    /// Attempt to recover from an unrecoverable database error by
+    /// dropping the current handle and re-opening from disk.
+    pub fn try_recover_from_error(&self) -> io::Result<()> {
+        let mut guard = self.inner.write().map_err(|_| Self::lock_poisoned())?;
+        let new_db = Self::build_database(&self.path, &self.opts)?;
+        *guard = Arc::new(new_db);
+        Ok(())
+    }
+
+    fn inner(&self) -> io::Result<Arc<Rocks>> {
+        let guard = self.inner.read().map_err(|_| Self::lock_poisoned())?;
+        Ok(Arc::clone(&guard))
+    }
+
     /// Opens (or creates) a RocksDB database at the given filesystem `path`
     /// using [`RocksDBConfig::default()`].
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -968,7 +999,7 @@ impl RocksDB {
         let db = Rocks::open_cf_descriptors(&opts, path, descriptors).map_err(io::Error::other)?;
 
         Ok(Self {
-            inner: Arc::new(db),
+            inner: Arc::new(RwLock::new(Arc::new(db))),
             path: path_str,
             opts: Arc::new(opts),
             write_opts: write_opts.map(Arc::new),
@@ -988,7 +1019,8 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         // Create cf if not exists (race-safe: retry handle on create failure)
         let cf = if let Some(cf) = db.cf_handle(table) {
@@ -1027,7 +1059,8 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         let cf = match db.cf_handle(table) {
             Some(cf) => cf,
@@ -1051,7 +1084,8 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         let cf = match db.cf_handle(table) {
             Some(cf) => cf,
@@ -1083,7 +1117,8 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         let cf = match db.cf_handle(table) {
             Some(cf) => cf,
@@ -1123,7 +1158,8 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         let cf = match db.cf_handle(table) {
             Some(cf) => cf,
@@ -1153,7 +1189,7 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        Ok(self.inner.cf_handle(table).is_some())
+        Ok(self.inner()?.cf_handle(table).is_some())
     }
 
     fn delete_table(&self, table: &str) -> Result<(), io::Error> {
@@ -1164,7 +1200,8 @@ impl KeyValueDB for RocksDB {
             ));
         }
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         if db.cf_handle(table).is_some() {
             db.drop_cf(table).map_err(io::Error::other)?;
@@ -1180,7 +1217,8 @@ impl KeyValueDB for RocksDB {
             .filter(|n| n != DEFAULT_CF)
             .collect::<Vec<String>>();
 
-        let db = &*self.inner;
+        let inner = self.inner()?;
+        let db = &*inner;
 
         for table_name in current_tables {
             if db.cf_handle(&table_name).is_some() {

@@ -20,6 +20,14 @@ pub trait TransactionalKVDB: MaybeSendSync + 'static {
     fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error>;
     /// Begins a new read-write transaction.
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error>;
+
+    /// Attempts to recover the database from an unrecoverable internal state.
+    ///
+    /// The default implementation is a no-op. Backends that support runtime
+    /// recovery should override this.
+    fn try_recover(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
 }
 
 /// Read-only transaction handle.
