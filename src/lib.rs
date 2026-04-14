@@ -57,7 +57,7 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use core2::io;
+use nostd::io;
 #[cfg(feature = "std")]
 use std::io;
 

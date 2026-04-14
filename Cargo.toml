@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 # no-std
-core2 = { version = "0.4", default-features = false }
+nostd = { version = "0.1", default-features = false, features = [
+    "alloc", "io"
+] }
 
 # data structures
 dashmap = { version = "6", optional = true }
