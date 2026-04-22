@@ -1,4 +1,6 @@
-use crate::{KeyValueDB, MaybeSendSync, decode, encode, io};
+use crate::{
+    Direction, KeyRange, KeyValueDB, MaybeSendSync, apply_range_in_memory, decode, encode, io,
+};
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
@@ -75,6 +77,58 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
         }
         Ok(result)
     }
+
+    /// Versioned counterpart of [`crate::KeyValueDB::iter_range`].
+    ///
+    /// Default implementation filters the full `iter()` output; every
+    /// blanket impl over `T: KeyValueDB` overrides this with an efficient
+    /// delegation to the underlying backend's `iter_range` so that only
+    /// at most `limit` entries are decoded.
+    #[allow(clippy::type_complexity)]
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let items = VersionedKeyValueDB::iter(self, table_name)?;
+        Ok(apply_range_in_memory(items, &range))
+    }
+
+    /// Cursor-based pagination.
+    #[allow(clippy::type_complexity)]
+    fn iter_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        VersionedKeyValueDB::iter_range(self, table_name, range)
+    }
+
+    /// Cursor-based pagination restricted to a prefix.
+    #[allow(clippy::type_complexity)]
+    fn iter_from_prefix_paginated(
+        &self,
+        table_name: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut range = KeyRange::prefix(prefix)
+            .with_direction(direction)
+            .with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        VersionedKeyValueDB::iter_range(self, table_name, range)
+    }
+
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         Ok(VersionedKeyValueDB::table_names(self)?.contains(&table_name.to_string()))
     }
@@ -176,6 +230,18 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
         Ok(result)
     }
 
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut result = Vec::new();
+        for (key, value) in KeyValueDB::iter_range(self, table_name, range)? {
+            result.push((key, decode(&value)?));
+        }
+        Ok(result)
+    }
+
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         KeyValueDB::contains_table(self, table_name)
     }
@@ -269,6 +335,18 @@ where
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
         for (key, value) in KeyValueDB::iter_from_prefix(self, table_name, prefix)? {
+            result.push((key, decode(&value)?));
+        }
+        Ok(result)
+    }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut result = Vec::new();
+        for (key, value) in KeyValueDB::iter_range(self, table_name, range)? {
             result.push((key, decode(&value)?));
         }
         Ok(result)

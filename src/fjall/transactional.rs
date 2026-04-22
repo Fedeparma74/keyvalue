@@ -36,7 +36,12 @@ pub struct WriteTransaction {
     snapshot: Snapshot,
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>, // For RYOW
     tx_deleted_tables: HashSet<String>,                         // Local to this transaction
-    global_deleted_tables: Arc<RwLock<HashSet<String>>>,        // Shared global state
+    /// Tables that were deleted *and then re-populated* within the same
+    /// transaction (i.e. `delete_table` followed by `insert` for the same
+    /// table name).  Their keyspace must be wiped during `commit()` *before*
+    /// applying the new pending inserts so that stale keys do not survive.
+    tx_recreated_tables: HashSet<String>,
+    global_deleted_tables: Arc<RwLock<HashSet<String>>>, // Shared global state
     max_memtable_size: u64,
 }
 
@@ -146,6 +151,66 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
             result.push((k_str, v.to_vec()));
         }
+        Ok(result)
+    }
+
+    fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        use core::ops::Bound as OB;
+
+        if table == META_DELETED_KEYSPACE || self.deleted_tables.contains(table) {
+            return Ok(Vec::new());
+        }
+        if !self.db.keyspace_exists(table) {
+            return Ok(Vec::new());
+        }
+        let ks = self
+            .db
+            .keyspace(table, || self.ks_options())
+            .map_err(io::Error::other)?;
+
+        let lower = match &range.lower {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+        let upper = match &range.upper {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+
+        let iter = self.snapshot.range(&ks, (lower, upper));
+        let limit = range.limit.unwrap_or(usize::MAX);
+        let mut result = Vec::new();
+
+        macro_rules! process {
+            ($it:expr) => {
+                for item in $it {
+                    let (k, v) = item.into_inner().map_err(io::Error::other)?;
+                    let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                    if range.is_beyond_far_end(&k_str) {
+                        break;
+                    }
+                    if !range.matches_prefix(&k_str) {
+                        continue;
+                    }
+                    result.push((k_str, v.to_vec()));
+                    if result.len() >= limit {
+                        break;
+                    }
+                }
+            };
+        }
+
+        match range.direction {
+            crate::Direction::Forward => process!(iter),
+            crate::Direction::Reverse => process!(iter.rev()),
+        }
+
         Ok(result)
     }
 }
@@ -271,6 +336,80 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         names.sort();
         Ok(names)
     }
+
+    fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        use core::ops::Bound as OB;
+
+        if table == META_DELETED_KEYSPACE {
+            return Ok(Vec::new());
+        }
+        let table_s = table.to_string();
+        if self.tx_deleted_tables.contains(&table_s) {
+            return Ok(Vec::new());
+        }
+        {
+            let guard = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?;
+            if guard.contains(table) {
+                return Ok(Vec::new());
+            }
+        }
+
+        // Start with pending entries for this table (small overlay).
+        let mut map = self.pending.get(&table_s).cloned().unwrap_or_default();
+
+        // Native range scan over the snapshot; merges only keys not shadowed
+        // by the pending overlay.  The range is restricted at the backend
+        // level so I/O is O(range).
+        if self.db.keyspace_exists(table) {
+            let ks = self
+                .db
+                .keyspace(table, || self.ks_options())
+                .map_err(io::Error::other)?;
+
+            let lower = match &range.lower {
+                crate::Bound::Unbounded => OB::Unbounded,
+                crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+                crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+            };
+            let upper = match &range.upper {
+                crate::Bound::Unbounded => OB::Unbounded,
+                crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+                crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+            };
+
+            for item in self.snapshot.range(&ks, (lower, upper)) {
+                let (k, v) = item.into_inner().map_err(io::Error::other)?;
+                let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                if !range.matches_prefix(&k_str) {
+                    continue;
+                }
+                map.entry(k_str).or_insert(Some(v.to_vec()));
+            }
+        }
+
+        // Materialize: filter by full range (pending entries may fall outside)
+        // and apply direction + limit.
+        let mut result: Vec<(String, Vec<u8>)> = map
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .filter(|(k, _)| range.contains(k))
+            .collect();
+        result.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if range.direction == crate::Direction::Reverse {
+            result.reverse();
+        }
+        if let Some(limit) = range.limit {
+            result.truncate(limit);
+        }
+        Ok(result)
+    }
 }
 
 impl<'a> KVWriteTransaction<'a> for WriteTransaction {
@@ -287,9 +426,10 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
             ));
         }
 
-        // If table was deleted in this transaction, "recreate" it
-        if self.tx_deleted_tables.contains(table) {
-            self.tx_deleted_tables.remove(table);
+        // If this table was previously deleted in this transaction, recreate it:
+        // move from deleted→recreated so commit() clears old data before inserting.
+        if self.tx_deleted_tables.remove(table) {
+            self.tx_recreated_tables.insert(table.to_string());
         }
 
         let old = self.get(table, key)?;
@@ -363,6 +503,22 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
         // Collect state changes to apply after successful commit
         let mut tables_to_undelete = Vec::new();
         let mut tables_to_delete = Vec::new();
+
+        // Wipe keyspaces for tables that were deleted-then-recreated in this tx.
+        // This must happen BEFORE applying the new pending inserts so that stale
+        // keys from before the transaction do not survive.
+        for table in &self.tx_recreated_tables {
+            if self.db.keyspace_exists(table) {
+                let ks = self
+                    .db
+                    .keyspace(table, || self.ks_options())
+                    .map_err(io::Error::other)?;
+                for item in tx.iter(&ks) {
+                    let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
+                    tx.remove(&ks, key_bytes);
+                }
+            }
+        }
 
         // Apply pending inserts/removes
         for (table, map) in &self.pending {
@@ -443,8 +599,8 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                     key,
                     value,
                 } => {
-                    if self.tx_deleted_tables.contains(&table_name) {
-                        self.tx_deleted_tables.remove(&table_name);
+                    if self.tx_deleted_tables.remove(&table_name) {
+                        self.tx_recreated_tables.insert(table_name.clone());
                     }
                     self.pending
                         .entry(table_name)
@@ -460,9 +616,11 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                     }
                 }
                 WriteOp::DeleteTable { table_name } => {
+                    self.tx_recreated_tables.remove(&table_name);
                     self.delete_table(&table_name)?;
                 }
                 WriteOp::Clear => {
+                    self.tx_recreated_tables.clear();
                     self.clear()?;
                 }
             }
@@ -499,6 +657,7 @@ impl TransactionalKVDB for FjallDB {
             snapshot: inner.read_tx(),
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
+            tx_recreated_tables: HashSet::new(),
             global_deleted_tables: self.deleted_tables.clone(),
             max_memtable_size: self.max_memtable_size,
         })

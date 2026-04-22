@@ -306,4 +306,110 @@ impl AsyncKeyValueDB for AwsS3DB {
         result.sort();
         Ok(result)
     }
+
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        validate_name("table name", table_name)?;
+
+        // Reverse direction is not natively supported by S3's ListObjectsV2.
+        // Fall back to the default in-memory implementation for that path.
+        if range.direction == crate::Direction::Reverse {
+            let items = AsyncKeyValueDB::iter(self, table_name).await?;
+            return Ok(crate::apply_range_in_memory(items, &range));
+        }
+
+        let table_prefix = format!("{}/", table_name);
+
+        // S3 `prefix` combines the table prefix with an optional user prefix.
+        let list_prefix = match &range.prefix {
+            Some(p) => format!("{}{}", table_prefix, p),
+            None => table_prefix.clone(),
+        };
+
+        // `start_after` strictly skips the provided key.  We use it for
+        // Excluded lower bounds; for Included lower bounds we still pass
+        // the predecessor + fetch the exact key separately when the bound
+        // key itself falls inside the prefix (handled below by including
+        // it unconditionally after the scan).
+        let start_after: Option<String> = match &range.lower {
+            crate::Bound::Unbounded => None,
+            crate::Bound::Included(k) => {
+                // Emulate inclusivity by asking S3 to skip the byte *before* k:
+                // start_after accepts any string, so we subtract a zero byte.
+                // If no predecessor is representable, fall back to None and
+                // rely on post-filtering.
+                let full = format!("{}{}", table_prefix, k);
+                let mut bytes = full.into_bytes();
+                if let Some(last) = bytes.last_mut()
+                    && *last > 0
+                {
+                    *last -= 1;
+                    bytes.push(0xFF);
+                }
+                String::from_utf8(bytes).ok()
+            }
+            crate::Bound::Excluded(k) => Some(format!("{}{}", table_prefix, k)),
+        };
+
+        let limit = range.limit.unwrap_or(usize::MAX);
+        let mut result: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        'outer: loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket_name)
+                .prefix(&list_prefix);
+            if let Some(sa) = &start_after {
+                req = req.start_after(sa);
+            }
+            if limit != usize::MAX {
+                // Cap per-page size; remaining will be fetched if needed.
+                let remaining = limit.saturating_sub(result.len());
+                let page = remaining.min(1000) as i32;
+                if page > 0 {
+                    req = req.max_keys(page);
+                }
+            }
+            if let Some(token) = &continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let output = req
+                .send()
+                .await
+                .map_err(|e| io::Error::other(format!("{:?}", e)))?;
+
+            for object in output.contents.unwrap_or_default() {
+                let full_key = object.key.unwrap_or_default();
+                let Some(key_in_table) = full_key.strip_prefix(&table_prefix) else {
+                    continue;
+                };
+                let key_owned = key_in_table.to_string();
+                if range.is_beyond_far_end(&key_owned) {
+                    break 'outer;
+                }
+                if !range.contains(&key_owned) {
+                    continue;
+                }
+                if let Some(data) = self.get(table_name, &key_owned).await? {
+                    result.push((key_owned, data));
+                    if result.len() >= limit {
+                        break 'outer;
+                    }
+                }
+            }
+
+            match output.next_continuation_token {
+                Some(token) => continuation_token = Some(token),
+                None => break,
+            }
+        }
+
+        Ok(result)
+    }
 }

@@ -486,11 +486,6 @@ pub struct RocksDBConfig {
     /// Default: **false**.
     pub skip_stats_update_on_db_open: bool,
 
-    /// Skip SST file size verification on open for faster startup.
-    ///
-    /// Default: **false**.
-    pub skip_checking_sst_file_sizes_on_db_open: bool,
-
     /// Interval for deleting obsolete files (microseconds).
     ///
     /// Default: **None** (upstream default).
@@ -584,7 +579,6 @@ impl Default for RocksDBConfig {
             enable_statistics: false,
             stats_dump_period_sec: None,
             skip_stats_update_on_db_open: false,
-            skip_checking_sst_file_sizes_on_db_open: false,
             delete_obsolete_files_period_micros: None,
             ttl: None,
         }
@@ -691,7 +685,7 @@ impl RocksDBConfig {
 /// The handle is wrapped in an `Arc` for cheap cloning.
 #[derive(Clone)]
 pub struct RocksDB {
-    inner: Arc<RwLock<Arc<Rocks>>>,
+    inner: Arc<RwLock<Option<Arc<Rocks>>>>,
     path: String,
     opts: Arc<Options>,
     write_opts: Option<Arc<WriteOptions>>,
@@ -716,18 +710,50 @@ impl RocksDB {
         Rocks::open_cf_descriptors(opts, path, descriptors).map_err(io::Error::other)
     }
 
-    /// Attempt to recover from an unrecoverable database error by
-    /// dropping the current handle and re-opening from disk.
+    /// Attempts to recover from a RocksDB error state by re-opening the
+    /// underlying database.
+    ///
+    /// When RocksDB encounters a critical I/O error (e.g. disk full) it may
+    /// mark itself as degraded and refuse further writes.  This method:
+    ///
+    /// 1. Acquires exclusive write access (no readers or writers in flight).
+    /// 2. Drops the old (possibly broken) `Arc<Rocks>` instance; once the
+    ///    last Arc clone is gone, the LOCK file is released.
+    /// 3. Re-opens the database from the same path and options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be re-opened (e.g. the
+    /// underlying hardware issue has not been resolved yet).
     pub fn try_recover_from_error(&self) -> io::Result<()> {
-        let mut guard = self.inner.write().map_err(|_| Self::lock_poisoned())?;
+        // Acquire write lock; also recover from any RwLock poison caused by
+        // a panicking thread that held the lock.
+        let mut inner_guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+
+        // Step 1: drop the old (possibly broken) Arc<Rocks>.
+        // The LOCK file is released once all Arc clones are gone.
+        *inner_guard = None;
+
+        // Step 2: re-open the database.
         let new_db = Self::build_database(&self.path, &self.opts)?;
-        *guard = Arc::new(new_db);
+
+        // Step 3: install the new instance.
+        *inner_guard = Some(Arc::new(new_db));
+
         Ok(())
     }
 
     fn inner(&self) -> io::Result<Arc<Rocks>> {
         let guard = self.inner.read().map_err(|_| Self::lock_poisoned())?;
-        Ok(Arc::clone(&guard))
+        guard.as_ref().map(Arc::clone).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "RocksDB is being recovered; retry after try_recover_from_error completes",
+            )
+        })
     }
 
     /// Opens (or creates) a RocksDB database at the given filesystem `path`
@@ -965,10 +991,6 @@ impl RocksDB {
         if config.skip_stats_update_on_db_open {
             opts.set_skip_stats_update_on_db_open(true);
         }
-        if config.skip_checking_sst_file_sizes_on_db_open {
-            #[allow(deprecated)]
-            opts.set_skip_checking_sst_file_sizes_on_db_open(true);
-        }
         if let Some(n) = config.delete_obsolete_files_period_micros {
             opts.set_delete_obsolete_files_period_micros(n);
         }
@@ -999,7 +1021,7 @@ impl RocksDB {
         let db = Rocks::open_cf_descriptors(&opts, path, descriptors).map_err(io::Error::other)?;
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Arc::new(db))),
+            inner: Arc::new(RwLock::new(Some(Arc::new(db)))),
             path: path_str,
             opts: Arc::new(opts),
             write_opts: write_opts.map(Arc::new),
@@ -1181,6 +1203,26 @@ impl KeyValueDB for RocksDB {
         Ok(result)
     }
 
+    fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        if table == DEFAULT_CF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot use default column family as table",
+            ));
+        }
+        let inner = self.inner()?;
+        let db = &*inner;
+        let cf = match db.cf_handle(table) {
+            Some(cf) => cf,
+            None => return Ok(Vec::new()),
+        };
+        rocks_collect_range(db, &cf, &range)
+    }
+
     fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
         if table == DEFAULT_CF {
             return Err(io::Error::new(
@@ -1228,4 +1270,84 @@ impl KeyValueDB for RocksDB {
 
         Ok(())
     }
+}
+
+/// Shared helper: apply a [`crate::KeyRange`] over a RocksDB column family
+/// using the backend-native seek + iterator.
+///
+/// Reused by all three `iter_range` impls ([`RocksDB`], `ReadTransaction`,
+/// `WriteTransaction`).  The function performs an O(range ∩ limit) scan and
+/// never materializes the full column family.
+pub(super) fn rocks_collect_range(
+    db: &Rocks,
+    cf: &impl rust_rocksdb::AsColumnFamilyRef,
+    range: &crate::KeyRange,
+) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+    let mode = rocks_iterator_mode(range);
+    collect_rocks_range(db.iterator_cf(cf, mode), range)
+}
+
+/// Compute the initial seek position and direction for a [`crate::KeyRange`]
+/// on a RocksDB iterator.
+pub(super) fn rocks_iterator_mode(range: &crate::KeyRange) -> IteratorMode<'_> {
+    use rust_rocksdb::Direction as RocksDir;
+    match range.direction {
+        crate::Direction::Forward => match range.lower.key() {
+            Some(k) => IteratorMode::From(k.as_bytes(), RocksDir::Forward),
+            None => match &range.prefix {
+                Some(p) => IteratorMode::From(p.as_bytes(), RocksDir::Forward),
+                None => IteratorMode::Start,
+            },
+        },
+        crate::Direction::Reverse => match range.upper.key() {
+            Some(k) => IteratorMode::From(k.as_bytes(), RocksDir::Reverse),
+            None => IteratorMode::End,
+        },
+    }
+}
+
+/// Collect a RocksDB iterator into a range-restricted, direction-aware,
+/// limit-bounded vector.  The seek position is assumed to have been
+/// configured via [`rocks_iterator_mode`] so that the iterator yields a
+/// contiguous segment of the key space in the requested direction.
+pub(super) fn collect_rocks_range<I>(
+    iter: I,
+    range: &crate::KeyRange,
+) -> Result<Vec<(String, Vec<u8>)>, io::Error>
+where
+    I: IntoIterator<Item = Result<(Box<[u8]>, Box<[u8]>), rust_rocksdb::Error>>,
+{
+    let limit = range.limit.unwrap_or(usize::MAX);
+    let mut result = Vec::new();
+
+    for item in iter {
+        let (k, v) = item.map_err(io::Error::other)?;
+        let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+        if !range.matches_lower(&k_str) {
+            if range.direction == crate::Direction::Forward {
+                continue;
+            } else {
+                break;
+            }
+        }
+        if !range.matches_upper(&k_str) {
+            if range.direction == crate::Direction::Reverse {
+                continue;
+            } else {
+                break;
+            }
+        }
+        if !range.matches_prefix(&k_str) {
+            if range.is_beyond_far_end(&k_str) {
+                break;
+            }
+            continue;
+        }
+        result.push((k_str, v.to_vec()));
+        if result.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(result)
 }

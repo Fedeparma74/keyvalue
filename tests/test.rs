@@ -916,4 +916,287 @@ mod tests {
                 .is_empty()
         );
     }
+
+    // =======================================================================
+    // iter_range / pagination — InMemoryDB
+    // =======================================================================
+
+    #[cfg(feature = "in-memory")]
+    #[test]
+    fn test_iter_range_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_iter_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_iter_range_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_iter_range(&db).await;
+    }
+
+    // --- RedbDB
+
+    #[cfg(feature = "redb")]
+    #[test]
+    fn test_iter_range_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_iter_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_iter_range_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_async_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_iter_range(&db).await;
+    }
+
+    // --- FjallDB
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_iter_range_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_iter_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_iter_range_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_async_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_iter_range(&db).await;
+    }
+
+    // --- RocksDB
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_iter_range_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_iter_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "rocksdb"))]
+    #[tokio::test]
+    async fn test_async_iter_range_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_async_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_iter_range(&db).await;
+    }
+
+    // --- SqliteDB (async only)
+
+    #[cfg(all(feature = "async", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_iter_range_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("ir_sqlite");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_iter_range(&db).await;
+    }
+
+    // =======================================================================
+    // batch_commit — InMemoryDB
+    // =======================================================================
+
+    #[cfg(all(feature = "transactional", feature = "in-memory"))]
+    #[test]
+    fn test_batch_commit_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_batch_commit(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_batch_commit_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_batch_commit(&db).await;
+    }
+
+    // --- RedbDB
+
+    #[cfg(all(feature = "transactional", feature = "redb"))]
+    #[test]
+    fn test_batch_commit_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_batch_commit(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_batch_commit_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_async_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_batch_commit(&db).await;
+    }
+
+    // --- FjallDB
+
+    #[cfg(all(feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_batch_commit_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_batch_commit(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_batch_commit_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_async_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_batch_commit(&db).await;
+    }
+
+    // --- RocksDB
+
+    #[cfg(all(feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_batch_commit_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_batch_commit(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "rocksdb"))]
+    #[tokio::test]
+    async fn test_async_batch_commit_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_async_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_batch_commit(&db).await;
+    }
+
+    // --- SqliteDB (async only)
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_batch_commit_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("bc_sqlite");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_batch_commit(&db).await;
+    }
+
+    // =======================================================================
+    // try_recover
+    // =======================================================================
+
+    #[cfg(all(feature = "transactional", feature = "in-memory"))]
+    #[test]
+    fn test_try_recover_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_try_recover(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_try_recover_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_try_recover(&db).await;
+    }
+
+    #[cfg(all(feature = "transactional", feature = "redb"))]
+    #[test]
+    fn test_try_recover_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_try_recover(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_try_recover_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_async_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_try_recover(&db).await;
+    }
+
+    #[cfg(all(feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_try_recover_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_try_recover(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_try_recover_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_async_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_try_recover(&db).await;
+    }
+
+    #[cfg(all(feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_try_recover_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_try_recover(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "rocksdb"))]
+    #[tokio::test]
+    async fn test_async_try_recover_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_async_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_try_recover(&db).await;
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_try_recover_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("tr_sqlite");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_try_recover(&db).await;
+    }
+
+    // =======================================================================
+    // InMemoryConfig
+    // =======================================================================
+
+    #[cfg(feature = "in-memory")]
+    #[test]
+    fn test_in_memory_config_default() {
+        use keyvalue::KeyValueDB;
+        let db = keyvalue::in_memory::InMemoryDB::new_with_config(
+            keyvalue::in_memory::InMemoryConfig::default(),
+        );
+        // Verify the DB is functional with a default config
+        db.insert("t", "k", b"v").unwrap();
+        assert_eq!(db.get("t", "k").unwrap(), Some(b"v".to_vec()));
+    }
+
+    #[cfg(feature = "in-memory")]
+    #[test]
+    fn test_in_memory_config_with_capacity() {
+        let config = keyvalue::in_memory::InMemoryConfig::default().initial_capacity(64);
+        let db = keyvalue::in_memory::InMemoryDB::new_with_config(config);
+        common::test_db(&db);
+    }
 }

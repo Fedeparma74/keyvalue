@@ -1,4 +1,6 @@
-use crate::{AsyncKeyValueDB, MaybeSendSync, decode, encode, io};
+use crate::{
+    AsyncKeyValueDB, Direction, KeyRange, MaybeSendSync, apply_range_in_memory, decode, encode, io,
+};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -74,6 +76,57 @@ pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
         }
         Ok(result)
     }
+
+    /// Async versioned counterpart of [`crate::KeyValueDB::iter_range`].
+    ///
+    /// Default implementation filters full `iter()` output; the blanket
+    /// impl over `T: AsyncKeyValueDB` overrides this to delegate to the
+    /// backend's native `iter_range` and decode only the returned entries.
+    #[allow(clippy::type_complexity)]
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let items = AsyncVersionedKeyValueDB::iter(self, table_name).await?;
+        Ok(apply_range_in_memory(items, &range))
+    }
+
+    /// Cursor-based pagination.
+    #[allow(clippy::type_complexity)]
+    async fn iter_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        AsyncVersionedKeyValueDB::iter_range(self, table_name, range).await
+    }
+
+    /// Cursor-based pagination restricted to a prefix.
+    #[allow(clippy::type_complexity)]
+    async fn iter_from_prefix_paginated(
+        &self,
+        table_name: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut range = KeyRange::prefix(prefix)
+            .with_direction(direction)
+            .with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        AsyncVersionedKeyValueDB::iter_range(self, table_name, range).await
+    }
+
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         Ok(AsyncVersionedKeyValueDB::table_names(self)
             .await?
@@ -186,6 +239,18 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
         Ok(result)
     }
 
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut result = Vec::new();
+        for (key, value) in AsyncKeyValueDB::iter_range(self, table_name, range).await? {
+            result.push((key, decode(&value)?));
+        }
+        Ok(result)
+    }
+
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         AsyncKeyValueDB::contains_table(self, table_name).await
     }
@@ -286,6 +351,18 @@ where
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
         for (key, value) in AsyncKeyValueDB::iter_from_prefix(self, table_name, prefix).await? {
+            result.push((key, decode(&value)?));
+        }
+        Ok(result)
+    }
+
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut result = Vec::new();
+        for (key, value) in AsyncKeyValueDB::iter_range(self, table_name, range).await? {
             result.push((key, decode(&value)?));
         }
         Ok(result)

@@ -1,6 +1,6 @@
 use crate::{
-    KVReadTransaction, KVWriteTransaction, MaybeSendSync, TransactionalKVDB, decode, encode, io,
-    versioned::VersionedObject,
+    Direction, KVReadTransaction, KVWriteTransaction, KeyRange, MaybeSendSync, TransactionalKVDB,
+    apply_range_in_memory, decode, encode, io, versioned::VersionedObject,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
@@ -36,6 +36,59 @@ pub trait KVReadVersionedTransaction<'a>: MaybeSendSync {
         }
         Ok(result)
     }
+
+    /// Versioned transactional counterpart of
+    /// [`crate::KeyValueDB::iter_range`].
+    ///
+    /// Default implementation filters the full `iter()` output; the
+    /// blanket impl over `T: KVReadTransaction` overrides this to delegate
+    /// to the backend's native range scan and decode only the returned
+    /// entries.
+    #[allow(clippy::type_complexity)]
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let items = self.iter(table_name)?;
+        Ok(apply_range_in_memory(items, &range))
+    }
+
+    /// Cursor-based pagination.
+    #[allow(clippy::type_complexity)]
+    fn iter_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.iter_range(table_name, range)
+    }
+
+    /// Cursor-based pagination restricted to a prefix.
+    #[allow(clippy::type_complexity)]
+    fn iter_from_prefix_paginated(
+        &self,
+        table_name: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut range = KeyRange::prefix(prefix)
+            .with_direction(direction)
+            .with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.iter_range(table_name, range)
+    }
+
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         Ok(self.table_names()?.contains(&table_name.to_string()))
     }
@@ -169,6 +222,18 @@ where
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
         let mut result = Vec::new();
         for (key, value) in KVReadTransaction::iter_from_prefix(self, table_name, prefix)? {
+            result.push((key, decode(&value)?));
+        }
+        Ok(result)
+    }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        let mut result = Vec::new();
+        for (key, value) in KVReadTransaction::iter_range(self, table_name, range)? {
             result.push((key, decode(&value)?));
         }
         Ok(result)

@@ -228,11 +228,28 @@ impl FjallConfig {
 /// into a deleted keyspace transparently un-deletes it.
 #[derive(Clone)]
 pub struct FjallDB {
-    inner: Arc<RwLock<SingleWriterTxDatabase>>,
+    inner: Arc<RwLock<Option<SingleWriterTxDatabase>>>,
     path: Arc<PathBuf>,
     config: Arc<FjallConfig>,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
     max_memtable_size: u64,
+}
+
+/// RAII guard returned by [`FjallDB::inner`].
+///
+/// Derefs to `SingleWriterTxDatabase` so all call-sites remain unchanged.
+/// Constructed only via [`FjallDB::inner`], which ensures the `Option` is
+/// `Some` before handing out the guard.
+pub(super) struct FjallDBGuard<'a>(std::sync::RwLockReadGuard<'a, Option<SingleWriterTxDatabase>>);
+
+impl<'a> std::ops::Deref for FjallDBGuard<'a> {
+    type Target = SingleWriterTxDatabase;
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `inner()` only constructs this guard after verifying `is_some()`.
+        self.0
+            .as_ref()
+            .expect("FjallDB inner is None during recovery")
+    }
 }
 
 impl FjallDB {
@@ -252,7 +269,7 @@ impl FjallDB {
         Self::load_deleted_tables(&inner, &deleted)?;
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(RwLock::new(Some(inner))),
             path: Arc::new(path.to_path_buf()),
             config: Arc::new(config.clone()),
             deleted_tables: deleted,
@@ -285,10 +302,13 @@ impl FjallDB {
         builder.open().map_err(io::Error::other)
     }
 
-    /// Loads persisted deleted-table markers from the internal `_meta_deleted` keyspace.
-    fn load_deleted_tables(
+    /// Loads persisted deleted-table markers from the internal `_meta_deleted`
+    /// keyspace into an already-locked `HashSet`.
+    ///
+    /// Used both at open-time and during `try_recover_from_poison`.
+    fn load_deleted_tables_into(
         inner: &SingleWriterTxDatabase,
-        deleted: &Arc<RwLock<HashSet<String>>>,
+        deleted: &mut HashSet<String>,
     ) -> io::Result<()> {
         if inner.keyspace_exists(META_DELETED_KEYSPACE) {
             let meta_ks = inner
@@ -300,56 +320,80 @@ impl FjallDB {
                 let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
                 let table_name = String::from_utf8(key_bytes.to_vec())
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let mut deleted_tables = deleted.write().map_err(|_| lock_poisoned())?;
-                deleted_tables.insert(table_name);
+                deleted.insert(table_name);
             }
         }
         Ok(())
     }
 
-    /// Attempts to recover from a fjall `Poisoned` state by re-opening the
-    /// underlying database.
+    /// Loads persisted deleted-table markers from the internal `_meta_deleted` keyspace.
+    fn load_deleted_tables(
+        inner: &SingleWriterTxDatabase,
+        deleted: &Arc<RwLock<HashSet<String>>>,
+    ) -> io::Result<()> {
+        let mut guard = deleted.write().map_err(|_| lock_poisoned())?;
+        Self::load_deleted_tables_into(inner, &mut guard)
+    }
+
+    /// Attempts to recover from a fjall database-level error state by
+    /// re-opening the underlying database.
     ///
     /// When fjall encounters a hardware-level I/O failure (e.g. disk full)
     /// during a flush or commit, it marks the database instance as *poisoned*
-    /// and refuses all future writes. This method drops the poisoned instance,
-    /// re-opens the database from the same path and config, and reloads the
-    /// deleted-table metadata.
+    /// and refuses all future writes.  This method:
+    ///
+    /// 1. Acquires exclusive write access (no readers or writers in flight).
+    /// 2. Drops the old (poisoned) database instance, releasing the file lock.
+    /// 3. Re-opens the database from the same path and config.
+    /// 4. Reloads the in-memory deleted-table metadata from disk.
     ///
     /// # Errors
     ///
     /// Returns an error if the database cannot be re-opened (e.g. the
-    /// underlying hardware issue has not been resolved).
+    /// underlying hardware issue has not been resolved yet).
     pub fn try_recover_from_poison(&self) -> io::Result<()> {
-        let mut inner_guard = self.inner.write().map_err(|_| lock_poisoned())?;
+        // Acquire write lock; also recover from any RwLock poison caused by
+        // a panicking thread that held the lock.
+        let mut inner_guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let mut deleted_guard = match self.deleted_tables.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
 
-        // Drop the old (poisoned) database and re-open
+        // Step 1: drop the old (possibly poisoned) instance so fjall releases
+        // its exclusive file lock on the database directory.
+        *inner_guard = None;
+
+        // Step 2: re-open the database.  This will fail if the underlying
+        // issue (e.g. disk full) has not been resolved.
         let new_db = Self::build_database(&self.path, &self.config)?;
-        *inner_guard = new_db;
 
-        // Reload deleted tables from the fresh database
-        let mut deleted = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
-        deleted.clear();
-        if inner_guard.keyspace_exists(META_DELETED_KEYSPACE) {
-            let meta_ks = inner_guard
-                .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
-                .map_err(io::Error::other)?;
+        // Step 3: reload deleted-table metadata from the fresh database.
+        deleted_guard.clear();
+        Self::load_deleted_tables_into(&new_db, &mut deleted_guard)?;
 
-            let snapshot = inner_guard.read_tx();
-            for item in snapshot.iter(&meta_ks) {
-                let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
-                let table_name = String::from_utf8(key_bytes.to_vec())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                deleted.insert(table_name);
-            }
-        }
+        // Step 4: install the new database.
+        *inner_guard = Some(new_db);
 
         Ok(())
     }
 
     /// Acquires a read lock on the inner database.
-    fn inner(&self) -> io::Result<std::sync::RwLockReadGuard<'_, SingleWriterTxDatabase>> {
-        self.inner.read().map_err(|_| lock_poisoned())
+    ///
+    /// Returns an error if the database is currently being recovered
+    /// (i.e. a `try_recover_from_poison` call is in progress).
+    fn inner(&self) -> io::Result<FjallDBGuard<'_>> {
+        let guard = self.inner.read().map_err(|_| lock_poisoned())?;
+        if guard.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "fjall database is being recovered; retry after try_recover_from_poison completes",
+            ));
+        }
+        Ok(FjallDBGuard(guard))
     }
 
     /// Returns [`KeyspaceCreateOptions`] using the configured memtable size.
@@ -557,6 +601,75 @@ impl KeyValueDB for FjallDB {
             let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
             result.push((k_str, v.to_vec()));
         }
+        Ok(result)
+    }
+
+    fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        use core::ops::Bound as OB;
+        use fjall::Readable;
+
+        if table == META_DELETED_KEYSPACE {
+            return Ok(Vec::new());
+        }
+        {
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
+            if deleted_tables.contains(table) {
+                return Ok(Vec::new());
+            }
+        }
+        let inner = self.inner()?;
+        if !inner.keyspace_exists(table) {
+            return Ok(Vec::new());
+        }
+        let ks = inner
+            .keyspace(table, || self.ks_options())
+            .map_err(io::Error::other)?;
+
+        // Translate our Bound -> std::ops::Bound<Vec<u8>>.
+        let lower = match &range.lower {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+        let upper = match &range.upper {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+
+        let snapshot = inner.read_tx();
+        let iter = snapshot.range(&ks, (lower, upper));
+        let limit = range.limit.unwrap_or(usize::MAX);
+        let mut result = Vec::new();
+
+        macro_rules! process {
+            ($it:expr) => {
+                for item in $it {
+                    let (k, v) = item.into_inner().map_err(io::Error::other)?;
+                    let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                    if range.is_beyond_far_end(&k_str) {
+                        break;
+                    }
+                    if !range.matches_prefix(&k_str) {
+                        continue;
+                    }
+                    result.push((k_str, v.to_vec()));
+                    if result.len() >= limit {
+                        break;
+                    }
+                }
+            };
+        }
+
+        match range.direction {
+            crate::Direction::Forward => process!(iter),
+            crate::Direction::Reverse => process!(iter.rev()),
+        }
+
         Ok(result)
     }
 

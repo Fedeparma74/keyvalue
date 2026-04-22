@@ -1375,3 +1375,563 @@ pub async fn check_test_data_async(db: &dyn keyvalue::AsyncKeyValueDB) {
     assert!(table_names.contains(&table1.to_string()));
     assert!(table_names.contains(&table2.to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// iter_range / pagination — sync
+// ---------------------------------------------------------------------------
+
+/// Tests `iter_range`, `iter_paginated`, `iter_from_prefix_paginated`,
+/// `keys_paginated`, `values_paginated` on any [`keyvalue::KeyValueDB`].
+///
+/// Assumes the database is **empty** on entry and cleans up after itself.
+#[cfg(feature = "std")]
+pub fn test_iter_range<D: keyvalue::KeyValueDB>(db: &D) {
+    use keyvalue::{Bound, Direction, KeyRange};
+
+    // Seed deterministic data in sorted key order:
+    // table "r": k1..k5
+    // table "p": prefix:a, prefix:b, prefix:c, other:x
+    for i in 1u8..=5 {
+        let key = format!("k{i}");
+        let val = format!("v{i}");
+        db.insert("r", &key, val.as_bytes()).unwrap();
+    }
+    db.insert("p", "prefix:a", b"a").unwrap();
+    db.insert("p", "prefix:b", b"b").unwrap();
+    db.insert("p", "prefix:c", b"c").unwrap();
+    db.insert("p", "other:x", b"x").unwrap();
+
+    // --- full forward range -----------------------------------------------
+    let all = db.iter_range("r", KeyRange::all()).unwrap();
+    let keys: Vec<_> = all.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k1", "k2", "k3", "k4", "k5"]);
+
+    // --- full reverse range -----------------------------------------------
+    let rev = db.iter_range("r", KeyRange::all().reverse()).unwrap();
+    let keys: Vec<_> = rev.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k5", "k4", "k3", "k2", "k1"]);
+
+    // --- limit forward ----------------------------------------------------
+    let lim = db.iter_range("r", KeyRange::all().with_limit(3)).unwrap();
+    let keys: Vec<_> = lim.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k1", "k2", "k3"]);
+
+    // --- limit reverse ----------------------------------------------------
+    let lim_r = db
+        .iter_range("r", KeyRange::all().reverse().with_limit(2))
+        .unwrap();
+    let keys: Vec<_> = lim_r.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k5", "k4"]);
+
+    // --- lower bound (inclusive) -----------------------------------------
+    let lb = db
+        .iter_range(
+            "r",
+            KeyRange::all().with_lower(Bound::Included("k3".to_string())),
+        )
+        .unwrap();
+    let keys: Vec<_> = lb.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k3", "k4", "k5"]);
+
+    // --- lower bound (exclusive) -----------------------------------------
+    let lb_ex = db
+        .iter_range(
+            "r",
+            KeyRange::all().with_lower(Bound::Excluded("k3".to_string())),
+        )
+        .unwrap();
+    let keys: Vec<_> = lb_ex.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k4", "k5"]);
+
+    // --- upper bound (exclusive) -----------------------------------------
+    let ub = db
+        .iter_range(
+            "r",
+            KeyRange::all().with_upper(Bound::Excluded("k4".to_string())),
+        )
+        .unwrap();
+    let keys: Vec<_> = ub.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k1", "k2", "k3"]);
+
+    // --- prefix range ----------------------------------------------------
+    let pfx = db.iter_range("p", KeyRange::prefix("prefix:")).unwrap();
+    let keys: Vec<_> = pfx.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["prefix:a", "prefix:b", "prefix:c"]);
+
+    // --- prefix range reverse + limit ------------------------------------
+    let pfx_r = db
+        .iter_range("p", KeyRange::prefix("prefix:").reverse().with_limit(2))
+        .unwrap();
+    let keys: Vec<_> = pfx_r.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["prefix:c", "prefix:b"]);
+
+    // --- non-existent table returns empty --------------------------------
+    assert!(
+        db.iter_range("no_such_table", KeyRange::all())
+            .unwrap()
+            .is_empty()
+    );
+
+    // --- iter_paginated: cursor-based pagination -------------------------
+    let page1 = db.iter_paginated("r", None, 2, Direction::Forward).unwrap();
+    let p1_keys: Vec<_> = page1.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(p1_keys, vec!["k1", "k2"]);
+
+    let cursor = page1.last().map(|(k, _)| k.as_str());
+    let page2 = db
+        .iter_paginated("r", cursor, 2, Direction::Forward)
+        .unwrap();
+    let p2_keys: Vec<_> = page2.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(p2_keys, vec!["k3", "k4"]);
+
+    let cursor = page2.last().map(|(k, _)| k.as_str());
+    let page3 = db
+        .iter_paginated("r", cursor, 2, Direction::Forward)
+        .unwrap();
+    let p3_keys: Vec<_> = page3.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(p3_keys, vec!["k5"]);
+
+    // --- iter_paginated reverse ------------------------------------------
+    let rpage1 = db.iter_paginated("r", None, 2, Direction::Reverse).unwrap();
+    let rp1_keys: Vec<_> = rpage1.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(rp1_keys, vec!["k5", "k4"]);
+
+    let rcursor = rpage1.last().map(|(k, _)| k.as_str());
+    let rpage2 = db
+        .iter_paginated("r", rcursor, 2, Direction::Reverse)
+        .unwrap();
+    let rp2_keys: Vec<_> = rpage2.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(rp2_keys, vec!["k3", "k2"]);
+
+    // --- iter_from_prefix_paginated --------------------------------------
+    let pp1 = db
+        .iter_from_prefix_paginated("p", "prefix:", None, 2, Direction::Forward)
+        .unwrap();
+    let pp1_keys: Vec<_> = pp1.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(pp1_keys, vec!["prefix:a", "prefix:b"]);
+
+    let pp2 = db
+        .iter_from_prefix_paginated(
+            "p",
+            "prefix:",
+            pp1.last().map(|(k, _)| k.as_str()),
+            2,
+            Direction::Forward,
+        )
+        .unwrap();
+    let pp2_keys: Vec<_> = pp2.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(pp2_keys, vec!["prefix:c"]);
+
+    // --- keys_paginated / values_paginated --------------------------------
+    let kp = db.keys_paginated("r", None, 3, Direction::Forward).unwrap();
+    assert_eq!(kp, vec!["k1", "k2", "k3"]);
+
+    let vp = db
+        .values_paginated("r", None, 3, Direction::Forward)
+        .unwrap();
+    assert_eq!(vp, vec![b"v1", b"v2", b"v3"]);
+
+    // cleanup
+    db.clear().unwrap();
+}
+
+/// Async version of [`test_iter_range`].
+#[cfg(all(feature = "async", feature = "std"))]
+pub async fn test_async_iter_range<D: keyvalue::AsyncKeyValueDB>(db: &D) {
+    use keyvalue::{Bound, Direction, KeyRange};
+
+    for i in 1u8..=5 {
+        let key = format!("k{i}");
+        let val = format!("v{i}");
+        db.insert("r", &key, val.as_bytes()).await.unwrap();
+    }
+    db.insert("p", "prefix:a", b"a").await.unwrap();
+    db.insert("p", "prefix:b", b"b").await.unwrap();
+    db.insert("p", "prefix:c", b"c").await.unwrap();
+    db.insert("p", "other:x", b"x").await.unwrap();
+
+    // full forward
+    let all = db.iter_range("r", KeyRange::all()).await.unwrap();
+    let keys: Vec<_> = all.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k1", "k2", "k3", "k4", "k5"]);
+
+    // full reverse
+    let rev = db.iter_range("r", KeyRange::all().reverse()).await.unwrap();
+    let keys: Vec<_> = rev.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k5", "k4", "k3", "k2", "k1"]);
+
+    // limit
+    let lim = db
+        .iter_range("r", KeyRange::all().with_limit(2))
+        .await
+        .unwrap();
+    let keys: Vec<_> = lim.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k1", "k2"]);
+
+    // lower bound inclusive
+    let lb = db
+        .iter_range(
+            "r",
+            KeyRange::all().with_lower(Bound::Included("k3".to_string())),
+        )
+        .await
+        .unwrap();
+    let keys: Vec<_> = lb.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k3", "k4", "k5"]);
+
+    // upper bound exclusive
+    let ub = db
+        .iter_range(
+            "r",
+            KeyRange::all().with_upper(Bound::Excluded("k4".to_string())),
+        )
+        .await
+        .unwrap();
+    let keys: Vec<_> = ub.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["k1", "k2", "k3"]);
+
+    // prefix
+    let pfx = db
+        .iter_range("p", KeyRange::prefix("prefix:"))
+        .await
+        .unwrap();
+    let keys: Vec<_> = pfx.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["prefix:a", "prefix:b", "prefix:c"]);
+
+    // non-existent table
+    assert!(
+        db.iter_range("no_such_table", KeyRange::all())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // cursor-based pagination
+    let page1 = db
+        .iter_paginated("r", None, 2, Direction::Forward)
+        .await
+        .unwrap();
+    let p1_keys: Vec<_> = page1.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(p1_keys, vec!["k1", "k2"]);
+
+    let cursor = page1.last().map(|(k, _)| k.as_str());
+    let page2 = db
+        .iter_paginated("r", cursor, 2, Direction::Forward)
+        .await
+        .unwrap();
+    let p2_keys: Vec<_> = page2.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(p2_keys, vec!["k3", "k4"]);
+
+    // keys_paginated / values_paginated
+    let kp = db
+        .keys_paginated("r", None, 3, Direction::Forward)
+        .await
+        .unwrap();
+    assert_eq!(kp, vec!["k1", "k2", "k3"]);
+
+    let vp = db
+        .values_paginated("r", None, 3, Direction::Forward)
+        .await
+        .unwrap();
+    assert_eq!(vp, vec![b"v1", b"v2", b"v3"]);
+
+    db.clear().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// batch_commit — sync
+// ---------------------------------------------------------------------------
+
+/// Tests [`keyvalue::KVWriteTransaction::batch_commit`] including:
+/// * basic insert + read after commit
+/// * remove via `WriteOp::Remove`
+/// * delete table via `WriteOp::DeleteTable`
+/// * global clear via `WriteOp::Clear`
+/// * correctness of `DeleteTable` followed by `Insert` in the same batch
+///   (old entries must not survive)
+#[cfg(feature = "transactional")]
+pub fn test_batch_commit<D: keyvalue::TransactionalKVDB>(db: &D) {
+    use keyvalue::{KVReadTransaction, KVWriteTransaction, WriteOp};
+
+    // --- basic insert batch -----------------------------------------------
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![
+        WriteOp::Insert {
+            table_name: "t1".to_string(),
+            key: "k1".to_string(),
+            value: b"v1".to_vec(),
+        },
+        WriteOp::Insert {
+            table_name: "t1".to_string(),
+            key: "k2".to_string(),
+            value: b"v2".to_vec(),
+        },
+        WriteOp::Insert {
+            table_name: "t2".to_string(),
+            key: "ka".to_string(),
+            value: b"va".to_vec(),
+        },
+    ])
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.get("t1", "k1").unwrap(), Some(b"v1".to_vec()));
+    assert_eq!(read.get("t1", "k2").unwrap(), Some(b"v2".to_vec()));
+    assert_eq!(read.get("t2", "ka").unwrap(), Some(b"va".to_vec()));
+    drop(read);
+
+    // --- remove via WriteOp::Remove --------------------------------------
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![WriteOp::Remove {
+        table_name: "t1".to_string(),
+        key: "k1".to_string(),
+    }])
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    assert!(read.get("t1", "k1").unwrap().is_none());
+    assert_eq!(read.get("t1", "k2").unwrap(), Some(b"v2".to_vec()));
+    drop(read);
+
+    // --- delete table via WriteOp::DeleteTable ---------------------------
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![WriteOp::DeleteTable {
+        table_name: "t1".to_string(),
+    }])
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    assert!(read.get("t1", "k2").unwrap().is_none());
+    assert!(read.iter("t1").unwrap().is_empty());
+    // t2 must be untouched
+    assert_eq!(read.get("t2", "ka").unwrap(), Some(b"va".to_vec()));
+    drop(read);
+
+    // --- WriteOp::Clear clears everything --------------------------------
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![WriteOp::Clear]).unwrap();
+
+    let read = db.begin_read().unwrap();
+    assert!(read.table_names().unwrap().is_empty());
+    drop(read);
+
+    // --- DeleteTable then Insert in same batch ---------------------------
+    // Precondition: insert some data into "old_tbl"
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![
+        WriteOp::Insert {
+            table_name: "old_tbl".to_string(),
+            key: "stale_key".to_string(),
+            value: b"stale".to_vec(),
+        },
+        WriteOp::Insert {
+            table_name: "old_tbl".to_string(),
+            key: "another".to_string(),
+            value: b"also_stale".to_vec(),
+        },
+    ])
+    .unwrap();
+
+    // Now delete and re-insert fresh data in the same batch
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![
+        WriteOp::DeleteTable {
+            table_name: "old_tbl".to_string(),
+        },
+        WriteOp::Insert {
+            table_name: "old_tbl".to_string(),
+            key: "new_key".to_string(),
+            value: b"new_value".to_vec(),
+        },
+    ])
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    // Old keys must NOT survive the DeleteTable
+    assert!(
+        read.get("old_tbl", "stale_key").unwrap().is_none(),
+        "stale_key should have been removed by DeleteTable in batch"
+    );
+    assert!(
+        read.get("old_tbl", "another").unwrap().is_none(),
+        "another should have been removed by DeleteTable in batch"
+    );
+    // New key must be present
+    assert_eq!(
+        read.get("old_tbl", "new_key").unwrap(),
+        Some(b"new_value".to_vec())
+    );
+    drop(read);
+
+    // --- Mixed ops in one batch -------------------------------------------
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![
+        WriteOp::Insert {
+            table_name: "mix".to_string(),
+            key: "a".to_string(),
+            value: b"1".to_vec(),
+        },
+        WriteOp::Insert {
+            table_name: "mix".to_string(),
+            key: "b".to_string(),
+            value: b"2".to_vec(),
+        },
+        WriteOp::Remove {
+            table_name: "mix".to_string(),
+            key: "a".to_string(),
+        },
+        WriteOp::Insert {
+            table_name: "mix".to_string(),
+            key: "c".to_string(),
+            value: b"3".to_vec(),
+        },
+    ])
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    assert!(read.get("mix", "a").unwrap().is_none());
+    assert_eq!(read.get("mix", "b").unwrap(), Some(b"2".to_vec()));
+    assert_eq!(read.get("mix", "c").unwrap(), Some(b"3".to_vec()));
+    drop(read);
+
+    // cleanup
+    let tx = db.begin_write().unwrap();
+    tx.batch_commit(vec![WriteOp::Clear]).unwrap();
+}
+
+/// Async version of [`test_batch_commit`].
+#[cfg(all(feature = "async", feature = "transactional"))]
+pub async fn test_async_batch_commit<D: keyvalue::AsyncTransactionalKVDB>(db: &D) {
+    use keyvalue::{AsyncKVReadTransaction, AsyncKVWriteTransaction, WriteOp};
+
+    // basic insert
+    let tx = db.begin_write().await.unwrap();
+    tx.batch_commit(vec![
+        WriteOp::Insert {
+            table_name: "t1".to_string(),
+            key: "k1".to_string(),
+            value: b"v1".to_vec(),
+        },
+        WriteOp::Insert {
+            table_name: "t2".to_string(),
+            key: "ka".to_string(),
+            value: b"va".to_vec(),
+        },
+    ])
+    .await
+    .unwrap();
+
+    let read = db.begin_read().await.unwrap();
+    assert_eq!(read.get("t1", "k1").await.unwrap(), Some(b"v1".to_vec()));
+    assert_eq!(read.get("t2", "ka").await.unwrap(), Some(b"va".to_vec()));
+    drop(read);
+
+    // remove
+    let tx = db.begin_write().await.unwrap();
+    tx.batch_commit(vec![WriteOp::Remove {
+        table_name: "t1".to_string(),
+        key: "k1".to_string(),
+    }])
+    .await
+    .unwrap();
+
+    let read = db.begin_read().await.unwrap();
+    assert!(read.get("t1", "k1").await.unwrap().is_none());
+    drop(read);
+
+    // delete table + re-insert (tests the DeleteTable+Insert bug fix)
+    let tx = db.begin_write().await.unwrap();
+    tx.batch_commit(vec![WriteOp::Insert {
+        table_name: "old_tbl".to_string(),
+        key: "stale".to_string(),
+        value: b"old".to_vec(),
+    }])
+    .await
+    .unwrap();
+
+    let tx = db.begin_write().await.unwrap();
+    tx.batch_commit(vec![
+        WriteOp::DeleteTable {
+            table_name: "old_tbl".to_string(),
+        },
+        WriteOp::Insert {
+            table_name: "old_tbl".to_string(),
+            key: "fresh".to_string(),
+            value: b"new".to_vec(),
+        },
+    ])
+    .await
+    .unwrap();
+
+    let read = db.begin_read().await.unwrap();
+    assert!(
+        read.get("old_tbl", "stale").await.unwrap().is_none(),
+        "stale entry must be gone after DeleteTable+Insert batch"
+    );
+    assert_eq!(
+        read.get("old_tbl", "fresh").await.unwrap(),
+        Some(b"new".to_vec())
+    );
+    drop(read);
+
+    // clear
+    let tx = db.begin_write().await.unwrap();
+    tx.batch_commit(vec![WriteOp::Clear]).await.unwrap();
+
+    let read = db.begin_read().await.unwrap();
+    assert!(read.table_names().await.unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// try_recover — sync
+// ---------------------------------------------------------------------------
+
+/// Verifies that [`keyvalue::TransactionalKVDB::try_recover`] at minimum
+/// does not return an error (the default is a no-op).
+#[cfg(feature = "transactional")]
+pub fn test_try_recover<D: keyvalue::TransactionalKVDB>(db: &D) {
+    // The default implementation is a no-op; we only check it does not err.
+    assert!(db.try_recover().is_ok());
+
+    // Data must still be accessible after a no-op recovery.
+    use keyvalue::{KVReadTransaction, KVWriteTransaction};
+    let mut write = db.begin_write().unwrap();
+    write.insert("recover_tbl", "k", b"v").unwrap();
+    write.commit().unwrap();
+
+    assert!(db.try_recover().is_ok());
+
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.get("recover_tbl", "k").unwrap(), Some(b"v".to_vec()));
+    drop(read);
+
+    // Cleanup
+    let mut write = db.begin_write().unwrap();
+    write.clear().unwrap();
+    write.commit().unwrap();
+}
+
+/// Async version of [`test_try_recover`].
+#[cfg(all(feature = "async", feature = "transactional"))]
+pub async fn test_async_try_recover<D: keyvalue::AsyncTransactionalKVDB>(db: &D) {
+    use keyvalue::{AsyncKVReadTransaction, AsyncKVWriteTransaction};
+
+    assert!(db.try_recover().await.is_ok());
+
+    let mut write = db.begin_write().await.unwrap();
+    write.insert("recover_tbl", "k", b"v").await.unwrap();
+    write.commit().await.unwrap();
+
+    assert!(db.try_recover().await.is_ok());
+
+    let read = db.begin_read().await.unwrap();
+    assert_eq!(
+        read.get("recover_tbl", "k").await.unwrap(),
+        Some(b"v".to_vec())
+    );
+    drop(read);
+
+    let mut write = db.begin_write().await.unwrap();
+    write.clear().await.unwrap();
+    write.commit().await.unwrap();
+}

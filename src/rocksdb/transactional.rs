@@ -7,7 +7,7 @@ use rust_rocksdb::{Direction, IteratorMode, Options, SnapshotWithThreadMode, Wri
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
-use super::{DEFAULT_CF, Rocks, RocksDB};
+use super::{DEFAULT_CF, Rocks, RocksDB, collect_rocks_range, rocks_iterator_mode};
 
 // ---------------------------------------------------------------------------
 // Owned snapshot helper
@@ -60,6 +60,10 @@ pub struct WriteTransaction {
     snapshot: ManuallyDrop<SnapshotWithThreadMode<'static, Rocks>>,
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>,
     tx_deleted_tables: HashSet<String>,
+    /// Tables deleted-then-re-populated within this transaction.  Their
+    /// column family is dropped before the new inserts are applied so that
+    /// stale keys do not survive (DeleteTable + Insert = recreate semantics).
+    tx_recreated_tables: HashSet<String>,
     path: String,
     opts: Arc<Options>,
 }
@@ -158,6 +162,25 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             result.push((k_str, v.to_vec()));
         }
         Ok(result)
+    }
+
+    fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        if table == DEFAULT_CF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot use default column family as table",
+            ));
+        }
+        let cf = match self.db.cf_handle(table) {
+            Some(cf) => cf,
+            None => return Ok(Vec::new()),
+        };
+        let mode = rocks_iterator_mode(&range);
+        collect_rocks_range(self.snapshot.iterator_cf(&cf, mode), &range)
     }
 }
 
@@ -300,6 +323,56 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)
     }
+
+    fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        if table == DEFAULT_CF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot use default column family as table",
+            ));
+        }
+        let table_s = table.to_string();
+        if self.tx_deleted_tables.contains(&table_s) {
+            return Ok(Vec::new());
+        }
+
+        // Overlay pending on top of a range-restricted snapshot scan.
+        let mut map = self.pending.get(&table_s).cloned().unwrap_or_default();
+
+        if let Some(cf) = self.db.cf_handle(table) {
+            let mode = rocks_iterator_mode(&range);
+            for item in self.snapshot.iterator_cf(&cf, mode) {
+                let (k, v) = item.map_err(io::Error::other)?;
+                let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                if range.is_beyond_far_end(&k_str) {
+                    break;
+                }
+                if !range.contains(&k_str) {
+                    continue;
+                }
+                map.entry(k_str).or_insert(Some(v.to_vec()));
+            }
+        }
+
+        // Materialize with range filter, direction and limit.
+        let mut result: Vec<(String, Vec<u8>)> = map
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .filter(|(k, _)| range.contains(k))
+            .collect();
+        result.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if range.direction == crate::Direction::Reverse {
+            result.reverse();
+        }
+        if let Some(limit) = range.limit {
+            result.truncate(limit);
+        }
+        Ok(result)
+    }
 }
 
 impl<'a> KVWriteTransaction<'a> for WriteTransaction {
@@ -316,9 +389,10 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
             ));
         }
 
-        // If table was deleted in this transaction, "recreate" it
-        if self.tx_deleted_tables.contains(table) {
-            self.tx_deleted_tables.remove(table);
+        // If table was deleted in this transaction, recreate it:
+        // track it in tx_recreated_tables so commit() drops the old CF first.
+        if self.tx_deleted_tables.remove(table) {
+            self.tx_recreated_tables.insert(table.to_string());
         }
 
         let old = self.get(table, key)?;
@@ -385,6 +459,14 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
         let db = &*self.db;
         let mut batch = WriteBatch::default();
 
+        // Drop CFs for tables that were deleted-then-recreated in this tx.
+        // Must happen before applying pending inserts so the old data is gone.
+        for table in &self.tx_recreated_tables {
+            if db.cf_handle(table).is_some() {
+                db.drop_cf(table).map_err(io::Error::other)?;
+            }
+        }
+
         // Apply pending inserts/removes (create CFs first if needed)
         for (table, map) in &self.pending {
             let cf = if let Some(cf) = db.cf_handle(table) {
@@ -433,8 +515,8 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                     key,
                     value,
                 } => {
-                    if self.tx_deleted_tables.contains(&table_name) {
-                        self.tx_deleted_tables.remove(&table_name);
+                    if self.tx_deleted_tables.remove(&table_name) {
+                        self.tx_recreated_tables.insert(table_name.clone());
                     }
                     self.pending
                         .entry(table_name)
@@ -450,9 +532,11 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                     }
                 }
                 WriteOp::DeleteTable { table_name } => {
+                    self.tx_recreated_tables.remove(&table_name);
                     self.delete_table(&table_name)?;
                 }
                 WriteOp::Clear => {
+                    self.tx_recreated_tables.clear();
                     self.clear()?;
                 }
             }
@@ -484,6 +568,7 @@ impl TransactionalKVDB for RocksDB {
             snapshot,
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
+            tx_recreated_tables: HashSet::new(),
             path: self.path.clone(),
             opts: self.opts.clone(),
         })

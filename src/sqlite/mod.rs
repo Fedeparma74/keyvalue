@@ -411,6 +411,64 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+/// Build the SQL statement + positional bind values for a [`crate::KeyRange`]
+/// on a SQLite key-value table.
+///
+/// Bound keys and prefix are always passed as bind parameters to avoid SQL
+/// injection; only the (already validated) table name and `ASC/DESC` are
+/// interpolated.
+pub(crate) fn build_range_sql(table: &str, range: &crate::KeyRange) -> (String, Vec<turso::Value>) {
+    let mut where_clauses: Vec<&'static str> = Vec::new();
+    let mut binds: Vec<turso::Value> = Vec::new();
+
+    match &range.lower {
+        crate::Bound::Unbounded => {}
+        crate::Bound::Included(k) => {
+            where_clauses.push("key >= ?");
+            binds.push(turso::Value::Text(k.clone()));
+        }
+        crate::Bound::Excluded(k) => {
+            where_clauses.push("key > ?");
+            binds.push(turso::Value::Text(k.clone()));
+        }
+    }
+    match &range.upper {
+        crate::Bound::Unbounded => {}
+        crate::Bound::Included(k) => {
+            where_clauses.push("key <= ?");
+            binds.push(turso::Value::Text(k.clone()));
+        }
+        crate::Bound::Excluded(k) => {
+            where_clauses.push("key < ?");
+            binds.push(turso::Value::Text(k.clone()));
+        }
+    }
+    if let Some(p) = &range.prefix {
+        where_clauses.push("key LIKE ? ESCAPE '\\'");
+        binds.push(turso::Value::Text(format!("{}%", escape_like(p))));
+    }
+
+    let where_clause = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+    let order = match range.direction {
+        crate::Direction::Forward => "ASC",
+        crate::Direction::Reverse => "DESC",
+    };
+    let limit_clause = match range.limit {
+        Some(l) => format!(" LIMIT {}", l),
+        None => String::new(),
+    };
+
+    let sql = format!(
+        "SELECT key, value FROM \"{}\"{} ORDER BY key {}{}",
+        table, where_clause, order, limit_clause,
+    );
+    (sql, binds)
+}
+
 /// Returns `true` if a table with the given name exists in the database.
 pub(crate) async fn table_exists(conn: &Connection, table: &str) -> Result<bool, io::Error> {
     let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
@@ -696,6 +754,31 @@ impl AsyncKeyValueDB for SqliteDB {
         let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
         let mut rows = stmt
             .query([like_pattern.as_str()])
+            .await
+            .map_err(io::Error::other)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(io::Error::other)? {
+            let key: String = row.get(0).map_err(io::Error::other)?;
+            let val: Vec<u8> = row.get(1).map_err(io::Error::other)?;
+            result.push((key, val));
+        }
+        Ok(result)
+    }
+
+    async fn iter_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        validate_table_name(table)?;
+        let conn = self.conn()?;
+        if !table_exists(&conn, table).await? {
+            return Ok(Vec::new());
+        }
+        let (sql, binds) = build_range_sql(table, &range);
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut rows = stmt
+            .query(turso::params_from_iter(binds))
             .await
             .map_err(io::Error::other)?;
         let mut result = Vec::new();

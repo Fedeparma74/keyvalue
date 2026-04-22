@@ -127,9 +127,26 @@ impl RedbConfig {
 /// cheap and the handle can be shared across threads.
 #[derive(Debug, Clone)]
 pub struct RedbDB {
-    inner: Arc<RwLock<Database>>,
+    inner: Arc<RwLock<Option<Database>>>,
     path: Arc<PathBuf>,
     config: Arc<RedbConfig>,
+}
+
+/// RAII guard returned by [`RedbDB::inner`].
+///
+/// Derefs to `redb::Database` so all call-sites remain unchanged.
+/// Constructed only via [`RedbDB::inner`], which ensures the `Option` is
+/// `Some` before handing out the guard.
+pub(super) struct RedbDBGuard<'a>(std::sync::RwLockReadGuard<'a, Option<Database>>);
+
+impl<'a> std::ops::Deref for RedbDBGuard<'a> {
+    type Target = Database;
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `inner()` only constructs this guard after verifying `is_some()`.
+        self.0
+            .as_ref()
+            .expect("RedbDB inner is None during recovery")
+    }
 }
 
 fn lock_poisoned() -> io::Error {
@@ -149,7 +166,7 @@ impl RedbDB {
         let inner = Self::build_database(path, &config)?;
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(RwLock::new(Some(inner))),
             path: Arc::new(path.to_path_buf()),
             config: Arc::new(config),
         })
@@ -162,17 +179,55 @@ impl RedbDB {
         builder.create(path).map_err(database_error_to_io_error)
     }
 
-    /// Attempts to recover the database by re-opening it from disk.
+    /// Attempts to recover from a redb error state by re-opening the
+    /// underlying database.
+    ///
+    /// When a critical I/O error is encountered (e.g. disk full) the database
+    /// handle becomes unusable.  This method:
+    ///
+    /// 1. Acquires exclusive write access (no readers or writers in flight).
+    /// 2. Drops the old (possibly broken) database instance, releasing the
+    ///    file lock held by redb.
+    /// 3. Re-opens the database from the same path and config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be re-opened (e.g. the
+    /// underlying hardware issue has not been resolved yet).
     pub fn try_recover_from_error(&self) -> io::Result<()> {
-        let mut inner_guard = self.inner.write().map_err(|_| lock_poisoned())?;
+        // Acquire write lock; also recover from any RwLock poison caused by
+        // a panicking thread that held the lock.
+        let mut inner_guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+
+        // Step 1: drop the old (possibly broken) instance so redb releases
+        // its exclusive file lock.
+        *inner_guard = None;
+
+        // Step 2: re-open the database.
         let new_db = Self::build_database(&self.path, &self.config)?;
-        *inner_guard = new_db;
+
+        // Step 3: install the new database.
+        *inner_guard = Some(new_db);
+
         Ok(())
     }
 
     /// Acquires a read lock on the inner database.
-    fn inner(&self) -> io::Result<std::sync::RwLockReadGuard<'_, Database>> {
-        self.inner.read().map_err(|_| lock_poisoned())
+    ///
+    /// Returns an error if the database is currently being recovered
+    /// (i.e. a `try_recover_from_error` call is in progress).
+    fn inner(&self) -> io::Result<RedbDBGuard<'_>> {
+        let guard = self.inner.read().map_err(|_| lock_poisoned())?;
+        if guard.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "redb database is being recovered; retry after try_recover_from_error completes",
+            ));
+        }
+        Ok(RedbDBGuard(guard))
     }
 }
 
@@ -292,6 +347,25 @@ impl KeyValueDB for RedbDB {
             result.push((key.value().to_string(), value.value().to_vec()));
         }
         Ok(result)
+    }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> io::Result<Vec<(String, Vec<u8>)>> {
+        let read_transaction = self
+            .inner()?
+            .begin_read()
+            .map_err(transaction_error_to_io_error)?;
+        let table_res =
+            read_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table = match table_res {
+            Ok(t) => t,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(table_error_to_io_error(e)),
+        };
+        redb_collect_range(&table, &range)
     }
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
@@ -430,4 +504,64 @@ fn commit_error_to_io_error(e: CommitError) -> io::Error {
         CommitError::Storage(e) => storage_error_to_io_error(e),
         e => io::Error::other(e),
     }
+}
+
+/// Shared helper: apply a [`KeyRange`] over an open redb [`ReadableTable`]
+/// using the backend-native range scan.
+///
+/// Used by all three `iter_range` impls ([`RedbDB`],
+/// [`ReadTransaction`](transactional::ReadTransaction),
+/// [`WriteTransaction`](transactional::WriteTransaction)).
+pub(super) fn redb_collect_range<T>(
+    table: &T,
+    range: &crate::KeyRange,
+) -> io::Result<Vec<(String, Vec<u8>)>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    use std::ops::Bound as OB;
+
+    let lower: OB<&str> = match &range.lower {
+        crate::Bound::Unbounded => OB::Unbounded,
+        crate::Bound::Included(k) => OB::Included(k.as_str()),
+        crate::Bound::Excluded(k) => OB::Excluded(k.as_str()),
+    };
+    let upper: OB<&str> = match &range.upper {
+        crate::Bound::Unbounded => OB::Unbounded,
+        crate::Bound::Included(k) => OB::Included(k.as_str()),
+        crate::Bound::Excluded(k) => OB::Excluded(k.as_str()),
+    };
+
+    let iter = table
+        .range::<&str>((lower, upper))
+        .map_err(storage_error_to_io_error)?;
+
+    let limit = range.limit.unwrap_or(usize::MAX);
+    let mut result = Vec::new();
+
+    macro_rules! process {
+        ($it:expr) => {
+            for item in $it {
+                let (k, v) = item.map_err(storage_error_to_io_error)?;
+                let k_str = k.value().to_string();
+                if range.is_beyond_far_end(&k_str) {
+                    break;
+                }
+                if !range.matches_prefix(&k_str) {
+                    continue;
+                }
+                result.push((k_str, v.value().to_vec()));
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        };
+    }
+
+    match range.direction {
+        crate::Direction::Forward => process!(iter),
+        crate::Direction::Reverse => process!(iter.rev()),
+    }
+
+    Ok(result)
 }

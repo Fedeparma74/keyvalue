@@ -1,4 +1,4 @@
-use crate::{MaybeSendSync, io};
+use crate::{Direction, KeyRange, MaybeSendSync, apply_range_in_memory, io};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
@@ -56,6 +56,91 @@ pub trait KVReadTransaction<'a>: MaybeSendSync {
         }
         Ok(result)
     }
+
+    /// Transactional counterpart of [`crate::KeyValueDB::iter_range`].
+    ///
+    /// See the non-transactional trait for semantics.  The default
+    /// implementation is an in-memory fallback; every shipped backend
+    /// overrides this with a native range-scan that honours the transaction
+    /// snapshot and any pending writes (read-your-own-writes).
+    #[allow(clippy::type_complexity)]
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let items = match &range.prefix {
+            Some(p) => self.iter_from_prefix(table_name, p.as_str())?,
+            None => self.iter(table_name)?,
+        };
+        Ok(apply_range_in_memory(items, &range))
+    }
+
+    /// Cursor-based pagination over the full table.
+    #[allow(clippy::type_complexity)]
+    fn iter_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.iter_range(table_name, range)
+    }
+
+    /// Cursor-based pagination restricted to a prefix.
+    #[allow(clippy::type_complexity)]
+    fn iter_from_prefix_paginated(
+        &self,
+        table_name: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let mut range = KeyRange::prefix(prefix)
+            .with_direction(direction)
+            .with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.iter_range(table_name, range)
+    }
+
+    /// Cursor-based pagination returning only keys.
+    fn keys_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<String>, io::Error> {
+        Ok(self
+            .iter_paginated(table_name, start_after, limit, direction)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
+    /// Cursor-based pagination returning only values.
+    fn values_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<Vec<u8>>, io::Error> {
+        Ok(self
+            .iter_paginated(table_name, start_after, limit, direction)?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
+    }
+
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         Ok(self.table_names()?.contains(&table_name.to_string()))
     }
@@ -63,18 +148,10 @@ pub trait KVReadTransaction<'a>: MaybeSendSync {
         Ok(self.get(table_name, key)?.is_some())
     }
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        let mut keys = Vec::new();
-        for (key, _) in self.iter(table_name)? {
-            keys.push(key);
-        }
-        Ok(keys)
+        Ok(self.iter(table_name)?.into_iter().map(|(k, _)| k).collect())
     }
     fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in self.iter(table_name)? {
-            values.push(value);
-        }
-        Ok(values)
+        Ok(self.iter(table_name)?.into_iter().map(|(_, v)| v).collect())
     }
 }
 

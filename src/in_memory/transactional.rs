@@ -273,19 +273,25 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
 
         // Apply pending mutations atomically.
         for (table_name, entries) in self.pending {
-            for (key, value) in entries {
-                match value {
-                    Some(val) => {
-                        self.db
-                            .map
-                            .entry(table_name.clone())
-                            .or_default()
-                            .insert(key, val);
-                    }
-                    None => {
-                        if let Some(mut table) = self.db.map.get_mut(&table_name) {
-                            table.remove(&key);
+            let has_inserts = entries.values().any(|v| v.is_some());
+            if has_inserts {
+                // `entry(table_name)` moves the String; no extra clone needed.
+                let mut table_ref = self.db.map.entry(table_name).or_default();
+                for (key, value) in entries {
+                    match value {
+                        Some(val) => {
+                            table_ref.insert(key, val);
                         }
+                        None => {
+                            table_ref.remove(&key);
+                        }
+                    }
+                }
+            } else {
+                // Removals only — avoid creating a new empty inner HashMap.
+                if let Some(mut table_ref) = self.db.map.get_mut(&table_name) {
+                    for (key, _) in entries {
+                        table_ref.remove(&key);
                     }
                 }
             }
@@ -311,7 +317,6 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                     key,
                     value,
                 } => {
-                    self.deleted_tables.remove(&table_name);
                     self.pending
                         .entry(table_name)
                         .or_default()

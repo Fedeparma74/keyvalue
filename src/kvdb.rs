@@ -1,4 +1,4 @@
-use crate::{MaybeSendSync, io};
+use crate::{Direction, KeyRange, MaybeSendSync, apply_range_in_memory, io};
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
@@ -73,6 +73,108 @@ pub trait KeyValueDB: MaybeSendSync + 'static {
         }
         Ok(result)
     }
+
+    /// Returns a slice of the ordered key-space described by `range`, already
+    /// sorted in the requested direction and truncated to `range.limit`.
+    ///
+    /// This is the **primary** pagination primitive: every other helper
+    /// ([`iter_paginated`](Self::iter_paginated),
+    /// [`iter_from_prefix_paginated`](Self::iter_from_prefix_paginated),
+    /// [`keys_paginated`](Self::keys_paginated),
+    /// [`values_paginated`](Self::values_paginated)) is a thin wrapper around
+    /// it.
+    ///
+    /// ## Default implementation
+    ///
+    /// The default implementation is an **in-memory fallback** that loads the
+    /// whole table (or prefix) via [`iter`](Self::iter) /
+    /// [`iter_from_prefix`](Self::iter_from_prefix), filters, sorts and
+    /// truncates.  It is O(N) in memory and CPU regardless of the requested
+    /// page size and **must not** be used in production hot paths.
+    ///
+    /// Every shipped backend overrides this with a native range-scan that is
+    /// O(limit).
+    #[allow(clippy::type_complexity)]
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let items = match &range.prefix {
+            Some(p) => self.iter_from_prefix(table_name, p.as_str())?,
+            None => self.iter(table_name)?,
+        };
+        Ok(apply_range_in_memory(items, &range))
+    }
+
+    /// Cursor-based pagination over the full table.
+    ///
+    /// Returns up to `limit` entries, skipping past `start_after` if provided,
+    /// in the requested [`Direction`].
+    #[allow(clippy::type_complexity)]
+    fn iter_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.iter_range(table_name, range)
+    }
+
+    /// Cursor-based pagination restricted to a prefix.
+    #[allow(clippy::type_complexity)]
+    fn iter_from_prefix_paginated(
+        &self,
+        table_name: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let mut range = KeyRange::prefix(prefix)
+            .with_direction(direction)
+            .with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.iter_range(table_name, range)
+    }
+
+    /// Cursor-based pagination returning only keys.
+    fn keys_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<String>, io::Error> {
+        Ok(self
+            .iter_paginated(table_name, start_after, limit, direction)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
+    /// Cursor-based pagination returning only values.
+    fn values_paginated(
+        &self,
+        table_name: &str,
+        start_after: Option<&str>,
+        limit: usize,
+        direction: Direction,
+    ) -> Result<Vec<Vec<u8>>, io::Error> {
+        Ok(self
+            .iter_paginated(table_name, start_after, limit, direction)?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
+    }
+
     /// Returns `true` if a table with the given name exists.
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         Ok(self.table_names()?.contains(&table_name.to_string()))

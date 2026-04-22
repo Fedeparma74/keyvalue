@@ -153,6 +153,20 @@ macro_rules! impl_async_kvdb_via_spawn_blocking {
                 .map_err(std::io::Error::other)?
             }
 
+            async fn iter_range(
+                &self,
+                table_name: &str,
+                range: $crate::KeyRange,
+            ) -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
+                let db = self.clone();
+                let table_name = table_name.to_string();
+                tokio::task::spawn_blocking(move || {
+                    $crate::KeyValueDB::iter_range(&db, &table_name, range)
+                })
+                .await
+                .map_err(std::io::Error::other)?
+            }
+
             async fn contains_table(&self, table_name: &str) -> Result<bool, std::io::Error> {
                 let db = self.clone();
                 let table_name = table_name.to_string();
@@ -232,10 +246,12 @@ pub use versioned::*;
 #[cfg(feature = "async")]
 mod async_kvdb;
 mod kvdb;
+mod range;
 
 #[cfg(feature = "async")]
 pub use async_kvdb::*;
 pub use kvdb::*;
+pub use range::*;
 
 #[cfg(feature = "in-memory")]
 pub mod in_memory;
