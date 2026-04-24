@@ -3,61 +3,66 @@
 //! Provides snapshot-isolated read transactions and buffered write
 //! transactions with explicit commit / abort semantics.
 //!
-//! * [`ReadTransaction`] captures a point-in-time clone of the database
-//!   and serves all reads from that snapshot.
+//! * [`ReadTransaction`] captures a point-in-time deep-clone of the
+//!   database and serves all reads from that snapshot.
 //! * [`WriteTransaction`] layers a pending-change buffer on top of the
-//!   snapshot so that reads reflect uncommitted writes (RYOW). On
-//!   [`commit()`](crate::KVWriteTransaction::commit) the buffered
-//!   mutations are applied atomically to the shared [`DashMap`](dashmap::DashMap).
+//!   snapshot so that reads reflect uncommitted writes (RYOW).  On
+//!   [`commit`](crate::KVWriteTransaction::commit) the buffered mutations
+//!   are applied atomically under a single write lock so no concurrent
+//!   operation observes a partially-committed state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 
-use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
+use crate::{KVReadTransaction, KVWriteTransaction, KeyRange, TransactionalKVDB};
 
-use super::InMemoryDB;
-
-// ---------------------------------------------------------------------------
-// Snapshot helper
-// ---------------------------------------------------------------------------
-
-/// Takes a consistent snapshot of every table in the `DashMap`.
-fn snapshot(
-    map: &dashmap::DashMap<String, HashMap<String, Vec<u8>>>,
-) -> HashMap<String, HashMap<String, Vec<u8>>> {
-    map.iter()
-        .map(|entry| (entry.key().clone(), entry.value().clone()))
-        .collect()
-}
+use super::{InMemoryDB, Store, Table, collect_prefix, collect_range};
 
 // ---------------------------------------------------------------------------
 // Transaction types
 // ---------------------------------------------------------------------------
 
 /// Read-only snapshot of an [`InMemoryDB`].
-///
-/// All reads are served from the snapshot taken at
-/// [`begin_read()`](TransactionalKVDB::begin_read) time, providing a
-/// consistent point-in-time view regardless of concurrent writes.
 pub struct ReadTransaction {
-    snapshot: HashMap<String, HashMap<String, Vec<u8>>>,
+    snapshot: Store,
 }
 
 /// Read-write transaction for [`InMemoryDB`].
-///
-/// Mutations are buffered in `pending` and only applied to the backing
-/// `DashMap` on [`commit()`](KVWriteTransaction::commit). Reads first
-/// check the pending buffer (read-your-own-writes) and then fall through
-/// to the snapshot.
 pub struct WriteTransaction {
     /// Reference to the shared backing store – used only during `commit()`.
     db: InMemoryDB,
     /// Point-in-time snapshot taken at `begin_write()`.
-    snapshot: HashMap<String, HashMap<String, Vec<u8>>>,
+    snapshot: Store,
     /// Buffered mutations: `None` means the key was deleted.
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>,
     /// Tables that have been entirely deleted within this transaction.
-    deleted_tables: std::collections::HashSet<String>,
+    deleted_tables: HashSet<String>,
+}
+
+impl WriteTransaction {
+    /// Merge the snapshot and pending layers for `table_name`, respecting
+    /// transaction-local deletions, into a single sorted [`Table`].
+    fn materialize_table(&self, table_name: &str) -> Table {
+        let table_deleted = self.deleted_tables.contains(table_name);
+        let mut merged: Table = if table_deleted {
+            Table::new()
+        } else {
+            self.snapshot.get(table_name).cloned().unwrap_or_default()
+        };
+        if let Some(pending) = self.pending.get(table_name) {
+            for (k, v) in pending {
+                match v {
+                    Some(val) => {
+                        merged.insert(k.clone(), val.clone());
+                    }
+                    None => {
+                        merged.remove(k);
+                    }
+                }
+            }
+        }
+        merged
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,17 +94,21 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        Ok(self
-            .snapshot
-            .get(table_name)
-            .map(|table| {
-                table
-                    .iter()
-                    .filter(|(k, _)| k.starts_with(prefix))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            })
-            .unwrap_or_default())
+        match self.snapshot.get(table_name) {
+            Some(table) => Ok(collect_prefix(table, prefix)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        match self.snapshot.get(table_name) {
+            Some(table) => Ok(collect_range(table, &range)),
+            None => Ok(Vec::new()),
+        }
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
@@ -136,26 +145,16 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
 
 impl<'a> KVReadTransaction<'a> for WriteTransaction {
     fn get(&self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
-        // Table was deleted in this transaction.
-        if self.deleted_tables.contains(table_name) {
-            // Still check pending – the table may have been re-populated
-            // after deletion within the same transaction.
-            if let Some(map) = self.pending.get(table_name)
-                && let Some(val) = map.get(key)
-            {
-                return Ok(val.clone());
-            }
-            return Ok(None);
-        }
-
-        // Check pending (RYOW).
+        // Check pending first (RYOW) even if the table was deleted – the
+        // same transaction may have re-populated it after deletion.
         if let Some(map) = self.pending.get(table_name)
             && let Some(val) = map.get(key)
         {
-            return Ok(val.clone()); // `None` → deleted, `Some(v)` → inserted
+            return Ok(val.clone()); // None → deleted, Some(v) → inserted
         }
-
-        // Fall through to snapshot.
+        if self.deleted_tables.contains(table_name) {
+            return Ok(None);
+        }
         Ok(self
             .snapshot
             .get(table_name)
@@ -163,49 +162,23 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
     }
 
     fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let table_deleted = self.deleted_tables.contains(table_name);
-
-        // Start from snapshot (unless the table was deleted).
-        let mut merged: HashMap<String, Vec<u8>> = if table_deleted {
-            HashMap::new()
-        } else {
-            self.snapshot.get(table_name).cloned().unwrap_or_default()
-        };
-
-        // Layer pending changes on top.
-        if let Some(pending_table) = self.pending.get(table_name) {
-            for (k, v) in pending_table {
-                match v {
-                    Some(val) => {
-                        merged.insert(k.clone(), val.clone());
-                    }
-                    None => {
-                        merged.remove(k);
-                    }
-                }
-            }
-        }
-
-        Ok(merged.into_iter().collect())
+        Ok(self.materialize_table(table_name).into_iter().collect())
     }
 
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        let mut names: std::collections::HashSet<String> = self.snapshot.keys().cloned().collect();
-
-        // Remove tables that were deleted in this transaction.
-        for deleted in &self.deleted_tables {
-            names.remove(deleted);
+        let mut names: BTreeMap<String, ()> = BTreeMap::new();
+        for name in self.snapshot.keys() {
+            if !self.deleted_tables.contains(name) {
+                names.insert(name.clone(), ());
+            }
         }
-
-        // Add tables that were (re-)created via pending inserts.
         for (table, entries) in &self.pending {
             // A table exists if it has at least one non-deleted entry.
             if entries.values().any(|v| v.is_some()) {
-                names.insert(table.clone());
+                names.insert(table.clone(), ());
             }
         }
-
-        Ok(names.into_iter().collect())
+        Ok(names.into_keys().collect())
     }
 
     fn iter_from_prefix(
@@ -213,15 +186,30 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        Ok(self
-            .iter(table_name)?
-            .into_iter()
-            .filter(|(k, _)| k.starts_with(prefix))
-            .collect())
+        let table = self.materialize_table(table_name);
+        Ok(collect_prefix(&table, prefix))
+    }
+
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        let table = self.materialize_table(table_name);
+        Ok(collect_range(&table, &range))
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        Ok(self.table_names()?.contains(&table_name.to_string()))
+        // Fast path – avoid materialising table_names.
+        if let Some(pending) = self.pending.get(table_name)
+            && pending.values().any(|v| v.is_some())
+        {
+            return Ok(true);
+        }
+        if self.deleted_tables.contains(table_name) {
+            return Ok(false);
+        }
+        Ok(self.snapshot.contains_key(table_name))
     }
 
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
@@ -229,11 +217,11 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
     }
 
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        Ok(self.iter(table_name)?.into_iter().map(|(k, _)| k).collect())
+        Ok(self.materialize_table(table_name).into_keys().collect())
     }
 
     fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
-        Ok(self.iter(table_name)?.into_iter().map(|(_, v)| v).collect())
+        Ok(self.materialize_table(table_name).into_values().collect())
     }
 }
 
@@ -258,6 +246,9 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
 
     fn remove(&mut self, table_name: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
         let old = self.get(table_name, key)?;
+        if old.is_none() {
+            return Ok(None);
+        }
         self.pending
             .entry(table_name.to_owned())
             .or_default()
@@ -266,33 +257,31 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     }
 
     fn commit(self) -> Result<(), io::Error> {
-        // Apply deleted tables first.
+        // A single write lock makes the commit truly atomic: no concurrent
+        // reader or writer can observe a partially-applied state.
+        let mut store = self.db.write()?;
+
         for table in &self.deleted_tables {
-            self.db.map.remove(table);
+            store.remove(table);
         }
 
-        // Apply pending mutations atomically.
         for (table_name, entries) in self.pending {
             let has_inserts = entries.values().any(|v| v.is_some());
             if has_inserts {
-                // `entry(table_name)` moves the String; no extra clone needed.
-                let mut table_ref = self.db.map.entry(table_name).or_default();
+                let table_entry = store.entry(table_name).or_default();
                 for (key, value) in entries {
                     match value {
                         Some(val) => {
-                            table_ref.insert(key, val);
+                            table_entry.insert(key, val);
                         }
                         None => {
-                            table_ref.remove(&key);
+                            table_entry.remove(&key);
                         }
                     }
                 }
-            } else {
-                // Removals only — avoid creating a new empty inner HashMap.
-                if let Some(mut table_ref) = self.db.map.get_mut(&table_name) {
-                    for (key, _) in entries {
-                        table_ref.remove(&key);
-                    }
+            } else if let Some(table_entry) = store.get_mut(&table_name) {
+                for (key, _) in entries {
+                    table_entry.remove(&key);
                 }
             }
         }
@@ -301,7 +290,6 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     }
 
     fn abort(self) -> Result<(), io::Error> {
-        // Simply drop – pending changes are discarded.
         Ok(())
     }
 
@@ -317,6 +305,12 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
                     key,
                     value,
                 } => {
+                    // NOTE: we intentionally do NOT remove `table_name` from
+                    // `deleted_tables` here.  If the table was deleted
+                    // earlier in this batch, the commit phase will first
+                    // drop the live table and then apply the buffered
+                    // inserts, giving `DeleteTable + Insert` the expected
+                    // "recreate" semantics.
                     self.pending
                         .entry(table_name)
                         .or_default()
@@ -343,13 +337,11 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
 
     fn delete_table(&mut self, table_name: &str) -> Result<(), io::Error> {
         self.deleted_tables.insert(table_name.to_owned());
-        // Clear any pending changes for this table.
         self.pending.remove(table_name);
         Ok(())
     }
 
     fn clear(&mut self) -> Result<(), io::Error> {
-        // Mark all snapshot tables and any pending-created tables as deleted.
         for name in self.snapshot.keys() {
             self.deleted_tables.insert(name.clone());
         }
@@ -370,17 +362,17 @@ impl TransactionalKVDB for InMemoryDB {
     type WriteTransaction<'a> = WriteTransaction;
 
     fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
-        Ok(ReadTransaction {
-            snapshot: snapshot(&self.map),
-        })
+        let snapshot = self.read()?.clone();
+        Ok(ReadTransaction { snapshot })
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+        let snapshot = self.read()?.clone();
         Ok(WriteTransaction {
             db: self.clone(),
-            snapshot: snapshot(&self.map),
+            snapshot,
             pending: HashMap::new(),
-            deleted_tables: std::collections::HashSet::new(),
+            deleted_tables: HashSet::new(),
         })
     }
 }
@@ -474,6 +466,13 @@ mod async_impl_direct {
         ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
             KVReadTransaction::iter_from_prefix(self, table_name, prefix)
         }
+        async fn iter_range(
+            &self,
+            table_name: &str,
+            range: crate::KeyRange,
+        ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+            KVReadTransaction::iter_range(self, table_name, range)
+        }
         async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
             KVReadTransaction::contains_table(self, table_name)
         }
@@ -506,6 +505,13 @@ mod async_impl_direct {
             prefix: &str,
         ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
             KVReadTransaction::iter_from_prefix(self, table_name, prefix)
+        }
+        async fn iter_range(
+            &self,
+            table_name: &str,
+            range: crate::KeyRange,
+        ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+            KVReadTransaction::iter_range(self, table_name, range)
         }
         async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
             KVReadTransaction::contains_table(self, table_name)

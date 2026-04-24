@@ -10,9 +10,6 @@ nostd = { version = "0.1", default-features = false, features = [
     "io",
 ] }
 
-# data structures
-dashmap = { version = "6", optional = true }
-
 # async
 async-trait = { version = "0.1", optional = true }
 futures = { version = "0.3", default-features = false, features = [
@@ -43,6 +40,7 @@ tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "macros",
     "time",
+    "sync",
 ] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -66,7 +64,7 @@ tokio = ["async", "dep:tokio", "tokio/rt-multi-thread"]
 transactional = []
 versioned = []
 
-in-memory = ["std", "dep:dashmap"]
+in-memory = ["std"]
 redb = ["std", "dep:redb"]
 fjall = ["std", "dep:fjall"]
 sqlite = ["std", "async", "dep:turso"]

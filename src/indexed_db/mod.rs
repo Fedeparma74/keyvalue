@@ -480,13 +480,15 @@ impl AsyncKeyValueDB for IndexedDB {
                     .transaction(&[&table_name])
                     .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
                         let table = tx.object_store(&table_name)?;
-                        let mut key_values = Vec::new();
-                        for key in table.get_all_keys(None).await? {
-                            if let Some(value) = table.get(&key).await? {
-                                let key = key.as_string().unwrap_or_default();
-                                let value = Uint8Array::from(value).to_vec();
-                                key_values.push((key, value));
-                            }
+                        // Fetch keys and values in two bulk calls instead of
+                        // N+1 `get()` round-trips per key.
+                        let keys = table.get_all_keys(None).await?;
+                        let values = table.get_all(None).await?;
+                        let mut key_values = Vec::with_capacity(keys.len().min(values.len()));
+                        for (k, v) in keys.into_iter().zip(values) {
+                            let key = k.as_string().unwrap_or_default();
+                            let value = Uint8Array::from(v).to_vec();
+                            key_values.push((key, value));
                         }
 
                         Ok(key_values)

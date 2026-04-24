@@ -15,7 +15,8 @@ use super::VersionedObject;
 /// soft-delete vs. prune on [`delete_table`](Self::delete_table) /
 /// [`clear`](Self::clear).
 ///
-/// A blanket implementation is provided for every `T: AsyncKeyValueDB`.
+/// A blanket implementation is provided for every `T: AsyncKeyValueDB + ?Sized`
+/// (including `dyn AsyncKeyValueDB`).
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
@@ -138,29 +139,28 @@ pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
             .is_some())
     }
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        let mut keys = Vec::new();
-        for (key, _) in AsyncVersionedKeyValueDB::iter(self, table_name).await? {
-            keys.push(key);
-        }
-        Ok(keys)
+        Ok(AsyncVersionedKeyValueDB::iter(self, table_name)
+            .await?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
     }
     async fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in AsyncVersionedKeyValueDB::iter(self, table_name).await? {
-            values.push(value);
-        }
-        Ok(values)
+        Ok(AsyncVersionedKeyValueDB::iter(self, table_name)
+            .await?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
     }
     /// Deletes all the entries in the specified table. If `prune` is false, the entries are
     /// marked as deleted by setting their value to `None` and increasing their version.
     /// If `prune` is true, the entries are permanently removed.
     async fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
+        if prune {
+            return self.prune_table(table_name).await;
+        }
         for key in AsyncVersionedKeyValueDB::keys(self, table_name).await? {
-            if prune {
-                AsyncVersionedKeyValueDB::remove(self, table_name, &key).await?;
-            } else {
-                AsyncVersionedKeyValueDB::update(self, table_name, &key, None).await?;
-            }
+            AsyncVersionedKeyValueDB::update(self, table_name, &key, None).await?;
         }
         Ok(())
     }
@@ -168,122 +168,33 @@ pub trait AsyncVersionedKeyValueDB: MaybeSendSync + 'static {
     /// marked as deleted by setting their value to `None` and increasing their version.
     /// If `prune` is true, the entries are permanently removed.
     async fn clear(&self, prune: bool) -> Result<(), io::Error> {
+        if prune {
+            return self.prune_all().await;
+        }
         for table_name in AsyncVersionedKeyValueDB::table_names(self).await? {
-            AsyncVersionedKeyValueDB::delete_table(self, &table_name, prune).await?;
+            AsyncVersionedKeyValueDB::delete_table(self, &table_name, false).await?;
         }
         Ok(())
     }
-}
 
-#[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
-#[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
-impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
-    async fn insert(
-        &self,
-        table_name: &str,
-        key: &str,
-        value: Option<&[u8]>,
-        version: u64,
-    ) -> Result<Option<VersionedObject>, io::Error> {
-        let obj = VersionedObject {
-            value: value.map(|v| v.to_vec()),
-            version,
-        };
-
-        let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)?).await?;
-        if let Some(old_value) = old_value {
-            Ok(Some(decode(&old_value)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = AsyncKeyValueDB::get(self, table_name, key).await?;
-        if let Some(value) = value {
-            Ok(Some(decode(&value)?))
-        } else {
-            Ok(None)
-        }
-    }
-    async fn remove(
-        &self,
-        table_name: &str,
-        key: &str,
-    ) -> Result<Option<VersionedObject>, io::Error> {
-        AsyncKeyValueDB::remove(self, table_name, key)
-            .await?
-            .map(|v| decode(&v))
-            .transpose()
-    }
-    async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in AsyncKeyValueDB::iter(self, table_name).await? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
-    }
-    async fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        AsyncKeyValueDB::table_names(self).await
-    }
-
-    async fn iter_from_prefix(
-        &self,
-        table_name: &str,
-        prefix: &str,
-    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in AsyncKeyValueDB::iter_from_prefix(self, table_name, prefix).await? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
-    }
-
-    async fn iter_range(
-        &self,
-        table_name: &str,
-        range: KeyRange,
-    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in AsyncKeyValueDB::iter_range(self, table_name, range).await? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
-    }
-
-    async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        AsyncKeyValueDB::contains_table(self, table_name).await
-    }
-    async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        AsyncKeyValueDB::contains_key(self, table_name, key).await
-    }
-    async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        AsyncKeyValueDB::keys(self, table_name).await
-    }
-    async fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in AsyncKeyValueDB::iter(self, table_name).await? {
-            values.push(decode(&value)?);
-        }
-        Ok(values)
-    }
-    async fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            AsyncKeyValueDB::delete_table(self, table_name).await?;
-        } else {
-            for key in AsyncKeyValueDB::keys(self, table_name).await? {
-                AsyncVersionedKeyValueDB::update(self, table_name, &key, None).await?;
-            }
+    /// Physically removes every entry from `table_name`.
+    ///
+    /// Bridge to the underlying backend's bulk-delete primitive.  The default
+    /// implementation removes entries one-by-one; the blanket impl over
+    /// `T: AsyncKeyValueDB` overrides this with a single `delete_table` call.
+    #[doc(hidden)]
+    async fn prune_table(&self, table_name: &str) -> Result<(), io::Error> {
+        for key in AsyncVersionedKeyValueDB::keys(self, table_name).await? {
+            AsyncVersionedKeyValueDB::remove(self, table_name, &key).await?;
         }
         Ok(())
     }
-    async fn clear(&self, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            AsyncKeyValueDB::clear(self).await?;
-        } else {
-            for table_name in AsyncKeyValueDB::table_names(self).await? {
-                AsyncVersionedKeyValueDB::delete_table(self, &table_name, false).await?;
-            }
+
+    /// Physically removes every table from the database.
+    #[doc(hidden)]
+    async fn prune_all(&self) -> Result<(), io::Error> {
+        for table_name in AsyncVersionedKeyValueDB::table_names(self).await? {
+            AsyncVersionedKeyValueDB::prune_table(self, &table_name).await?;
         }
         Ok(())
     }
@@ -293,7 +204,7 @@ impl AsyncVersionedKeyValueDB for dyn AsyncKeyValueDB {
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<T> AsyncVersionedKeyValueDB for T
 where
-    T: AsyncKeyValueDB,
+    T: AsyncKeyValueDB + ?Sized,
 {
     async fn insert(
         &self,
@@ -308,21 +219,16 @@ where
         };
 
         let old_value = AsyncKeyValueDB::insert(self, table_name, key, &encode(&obj)?).await?;
-        if let Some(old_value) = old_value {
-            Ok(Some(decode(&old_value)?))
-        } else {
-            Ok(None)
-        }
+        old_value.map(|bytes| decode(&bytes)).transpose()
     }
 
     async fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = AsyncKeyValueDB::get(self, table_name, key).await?;
-        if let Some(value) = value {
-            Ok(Some(decode(&value)?))
-        } else {
-            Ok(None)
-        }
+        AsyncKeyValueDB::get(self, table_name, key)
+            .await?
+            .map(|bytes| decode(&bytes))
+            .transpose()
     }
+
     async fn remove(
         &self,
         table_name: &str,
@@ -330,16 +236,18 @@ where
     ) -> Result<Option<VersionedObject>, io::Error> {
         AsyncKeyValueDB::remove(self, table_name, key)
             .await?
-            .map(|v| decode(&v))
+            .map(|bytes| decode(&bytes))
             .transpose()
     }
+
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in AsyncKeyValueDB::iter(self, table_name).await? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
+        AsyncKeyValueDB::iter(self, table_name)
+            .await?
+            .into_iter()
+            .map(|(k, v)| Ok((k, decode(&v)?)))
+            .collect()
     }
+
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
         AsyncKeyValueDB::table_names(self).await
     }
@@ -349,11 +257,11 @@ where
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in AsyncKeyValueDB::iter_from_prefix(self, table_name, prefix).await? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
+        AsyncKeyValueDB::iter_from_prefix(self, table_name, prefix)
+            .await?
+            .into_iter()
+            .map(|(k, v)| Ok((k, decode(&v)?)))
+            .collect()
     }
 
     async fn iter_range(
@@ -361,48 +269,31 @@ where
         table_name: &str,
         range: KeyRange,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in AsyncKeyValueDB::iter_range(self, table_name, range).await? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
+        AsyncKeyValueDB::iter_range(self, table_name, range)
+            .await?
+            .into_iter()
+            .map(|(k, v)| Ok((k, decode(&v)?)))
+            .collect()
     }
 
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         AsyncKeyValueDB::contains_table(self, table_name).await
     }
+
     async fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
         AsyncKeyValueDB::contains_key(self, table_name, key).await
     }
+
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
         AsyncKeyValueDB::keys(self, table_name).await
     }
-    async fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in AsyncKeyValueDB::iter(self, table_name).await? {
-            values.push(decode(&value)?);
-        }
-        Ok(values)
+
+    async fn prune_table(&self, table_name: &str) -> Result<(), io::Error> {
+        AsyncKeyValueDB::delete_table(self, table_name).await
     }
-    async fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            AsyncKeyValueDB::delete_table(self, table_name).await?;
-        } else {
-            for key in AsyncKeyValueDB::keys(self, table_name).await? {
-                AsyncVersionedKeyValueDB::update(self, table_name, &key, None).await?;
-            }
-        }
-        Ok(())
-    }
-    async fn clear(&self, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            AsyncKeyValueDB::clear(self).await?;
-        } else {
-            for table_name in AsyncKeyValueDB::table_names(self).await? {
-                AsyncVersionedKeyValueDB::delete_table(self, &table_name, false).await?;
-            }
-        }
-        Ok(())
+
+    async fn prune_all(&self) -> Result<(), io::Error> {
+        AsyncKeyValueDB::clear(self).await
     }
 }
 

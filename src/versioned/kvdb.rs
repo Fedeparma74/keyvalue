@@ -20,8 +20,9 @@ use super::VersionedObject;
 ///   is set to `None` and the version is incremented, creating a
 ///   *tombstone* that downstream consumers can observe.
 ///
-/// A blanket implementation is provided for every `T: KeyValueDB`, so
-/// any backend automatically gains versioned semantics.
+/// A blanket implementation is provided for every `T: KeyValueDB + ?Sized`
+/// (including `dyn KeyValueDB`), so any backend automatically gains
+/// versioned semantics.
 pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
     /// Inserts or updates the value of the key in the table with the specified version.
     /// If value is `None`, the entry is marked as deleted by setting its value to `None` and the specified version.
@@ -80,10 +81,9 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
 
     /// Versioned counterpart of [`crate::KeyValueDB::iter_range`].
     ///
-    /// Default implementation filters the full `iter()` output; every
-    /// blanket impl over `T: KeyValueDB` overrides this with an efficient
-    /// delegation to the underlying backend's `iter_range` so that only
-    /// at most `limit` entries are decoded.
+    /// Default implementation filters the full `iter()` output; the blanket
+    /// impl over `T: KeyValueDB` overrides this to delegate to the underlying
+    /// backend's `iter_range` so that only at most `limit` entries are decoded.
     #[allow(clippy::type_complexity)]
     fn iter_range(
         &self,
@@ -136,29 +136,26 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
         Ok(VersionedKeyValueDB::get(self, table_name, key)?.is_some())
     }
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        let mut keys = Vec::new();
-        for (key, _) in VersionedKeyValueDB::iter(self, table_name)? {
-            keys.push(key);
-        }
-        Ok(keys)
+        Ok(VersionedKeyValueDB::iter(self, table_name)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
     }
     fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in VersionedKeyValueDB::iter(self, table_name)? {
-            values.push(value);
-        }
-        Ok(values)
+        Ok(VersionedKeyValueDB::iter(self, table_name)?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
     }
     /// Deletes all the entries in the specified table. If `prune` is false, the entries are
     /// marked as deleted by setting their value to `None` and increasing their version.
     /// If `prune` is true, the entries are permanently removed.
     fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
+        if prune {
+            return self.prune_table(table_name);
+        }
         for key in VersionedKeyValueDB::keys(self, table_name)? {
-            if prune {
-                VersionedKeyValueDB::remove(self, table_name, &key)?;
-            } else {
-                VersionedKeyValueDB::update(self, table_name, &key, None)?;
-            }
+            VersionedKeyValueDB::update(self, table_name, &key, None)?;
         }
         Ok(())
     }
@@ -166,115 +163,34 @@ pub trait VersionedKeyValueDB: MaybeSendSync + 'static {
     /// marked as deleted by setting their value to `None` and increasing their version.
     /// If `prune` is true, the entries are permanently removed.
     fn clear(&self, prune: bool) -> Result<(), io::Error> {
+        if prune {
+            return self.prune_all();
+        }
         for table_name in VersionedKeyValueDB::table_names(self)? {
-            VersionedKeyValueDB::delete_table(self, &table_name, prune)?;
+            VersionedKeyValueDB::delete_table(self, &table_name, false)?;
         }
         Ok(())
     }
-}
 
-impl VersionedKeyValueDB for dyn KeyValueDB {
-    fn insert(
-        &self,
-        table_name: &str,
-        key: &str,
-        value: Option<&[u8]>,
-        version: u64,
-    ) -> Result<Option<VersionedObject>, io::Error> {
-        let obj = VersionedObject {
-            value: value.map(|v| v.to_vec()),
-            version,
-        };
-
-        let old_value = KeyValueDB::insert(self, table_name, key, &encode(&obj)?)?;
-        if let Some(old_value) = old_value {
-            Ok(Some(decode(&old_value)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = KeyValueDB::get(self, table_name, key)?;
-        if let Some(value) = value {
-            Ok(Some(decode(&value)?))
-        } else {
-            Ok(None)
-        }
-    }
-    fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        KeyValueDB::remove(self, table_name, key)?
-            .map(|v| decode(&v))
-            .transpose()
-    }
-    fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in KeyValueDB::iter(self, table_name)? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
-    }
-    fn table_names(&self) -> Result<Vec<String>, io::Error> {
-        KeyValueDB::table_names(self)
-    }
-
-    fn iter_from_prefix(
-        &self,
-        table_name: &str,
-        prefix: &str,
-    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in KeyValueDB::iter_from_prefix(self, table_name, prefix)? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
-    }
-
-    fn iter_range(
-        &self,
-        table_name: &str,
-        range: KeyRange,
-    ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in KeyValueDB::iter_range(self, table_name, range)? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
-    }
-
-    fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
-        KeyValueDB::contains_table(self, table_name)
-    }
-    fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
-        KeyValueDB::contains_key(self, table_name, key)
-    }
-    fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
-        KeyValueDB::keys(self, table_name)
-    }
-    fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in KeyValueDB::iter(self, table_name)? {
-            values.push(decode(&value)?);
-        }
-        Ok(values)
-    }
-    fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            KeyValueDB::delete_table(self, table_name)?;
-        } else {
-            for key in self.keys(table_name)? {
-                VersionedKeyValueDB::update(self, table_name, &key, None)?;
-            }
+    /// Physically removes every entry from `table_name`.
+    ///
+    /// Bridge to the underlying backend's bulk-delete primitive.  The default
+    /// implementation removes entries one-by-one via [`Self::remove`]; the
+    /// blanket impl over `T: KeyValueDB` overrides this with a single
+    /// `delete_table` call.
+    #[doc(hidden)]
+    fn prune_table(&self, table_name: &str) -> Result<(), io::Error> {
+        for key in VersionedKeyValueDB::keys(self, table_name)? {
+            VersionedKeyValueDB::remove(self, table_name, &key)?;
         }
         Ok(())
     }
-    fn clear(&self, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            KeyValueDB::clear(self)?;
-        } else {
-            for table_name in self.table_names()? {
-                VersionedKeyValueDB::delete_table(self, &table_name, false)?;
-            }
+
+    /// Physically removes every table from the database.
+    #[doc(hidden)]
+    fn prune_all(&self) -> Result<(), io::Error> {
+        for table_name in VersionedKeyValueDB::table_names(self)? {
+            VersionedKeyValueDB::prune_table(self, &table_name)?;
         }
         Ok(())
     }
@@ -282,7 +198,7 @@ impl VersionedKeyValueDB for dyn KeyValueDB {
 
 impl<T> VersionedKeyValueDB for T
 where
-    T: KeyValueDB,
+    T: KeyValueDB + ?Sized,
 {
     fn insert(
         &self,
@@ -296,34 +212,30 @@ where
             version,
         };
 
-        let old_value = KeyValueDB::insert(self, table_name, key, &encode(&obj)?)?;
-        if let Some(old_value) = old_value {
-            Ok(Some(decode(&old_value)?))
-        } else {
-            Ok(None)
-        }
+        KeyValueDB::insert(self, table_name, key, &encode(&obj)?)?
+            .map(|bytes| decode(&bytes))
+            .transpose()
     }
 
     fn get(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        let value = KeyValueDB::get(self, table_name, key)?;
-        if let Some(value) = value {
-            Ok(Some(decode(&value)?))
-        } else {
-            Ok(None)
-        }
-    }
-    fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
-        KeyValueDB::remove(self, table_name, key)?
-            .map(|v| decode(&v))
+        KeyValueDB::get(self, table_name, key)?
+            .map(|bytes| decode(&bytes))
             .transpose()
     }
-    fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in KeyValueDB::iter(self, table_name)? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
+
+    fn remove(&self, table_name: &str, key: &str) -> Result<Option<VersionedObject>, io::Error> {
+        KeyValueDB::remove(self, table_name, key)?
+            .map(|bytes| decode(&bytes))
+            .transpose()
     }
+
+    fn iter(&self, table_name: &str) -> Result<Vec<(String, VersionedObject)>, io::Error> {
+        KeyValueDB::iter(self, table_name)?
+            .into_iter()
+            .map(|(k, v)| Ok((k, decode(&v)?)))
+            .collect()
+    }
+
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
         KeyValueDB::table_names(self)
     }
@@ -333,11 +245,10 @@ where
         table_name: &str,
         prefix: &str,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in KeyValueDB::iter_from_prefix(self, table_name, prefix)? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
+        KeyValueDB::iter_from_prefix(self, table_name, prefix)?
+            .into_iter()
+            .map(|(k, v)| Ok((k, decode(&v)?)))
+            .collect()
     }
 
     fn iter_range(
@@ -345,48 +256,30 @@ where
         table_name: &str,
         range: KeyRange,
     ) -> Result<Vec<(String, VersionedObject)>, io::Error> {
-        let mut result = Vec::new();
-        for (key, value) in KeyValueDB::iter_range(self, table_name, range)? {
-            result.push((key, decode(&value)?));
-        }
-        Ok(result)
+        KeyValueDB::iter_range(self, table_name, range)?
+            .into_iter()
+            .map(|(k, v)| Ok((k, decode(&v)?)))
+            .collect()
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         KeyValueDB::contains_table(self, table_name)
     }
+
     fn contains_key(&self, table_name: &str, key: &str) -> Result<bool, io::Error> {
         KeyValueDB::contains_key(self, table_name, key)
     }
+
     fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
         KeyValueDB::keys(self, table_name)
     }
-    fn values(&self, table_name: &str) -> Result<Vec<VersionedObject>, io::Error> {
-        let mut values = Vec::new();
-        for (_, value) in KeyValueDB::iter(self, table_name)? {
-            values.push(decode(&value)?);
-        }
-        Ok(values)
+
+    fn prune_table(&self, table_name: &str) -> Result<(), io::Error> {
+        KeyValueDB::delete_table(self, table_name)
     }
-    fn delete_table(&self, table_name: &str, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            KeyValueDB::delete_table(self, table_name)?;
-        } else {
-            for key in self.keys(table_name)? {
-                VersionedKeyValueDB::update(self, table_name, &key, None)?;
-            }
-        }
-        Ok(())
-    }
-    fn clear(&self, prune: bool) -> Result<(), io::Error> {
-        if prune {
-            KeyValueDB::clear(self)?;
-        } else {
-            for table_name in self.table_names()? {
-                VersionedKeyValueDB::delete_table(self, &table_name, false)?;
-            }
-        }
-        Ok(())
+
+    fn prune_all(&self) -> Result<(), io::Error> {
+        KeyValueDB::clear(self)
     }
 }
 

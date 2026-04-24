@@ -44,7 +44,7 @@
 //!
 //! | Backend | Notes |
 //! |---------|-------|
-//! | In-memory | Full sync + async support. Uses [`DashMap`](dashmap::DashMap) internally. |
+//! | In-memory | Full sync + async support.  Uses a single `RwLock<HashMap>` internally. |
 //! | LocalStorage | Sync + async. ~5 MiB browser limit. Main-thread only. |
 //! | IndexedDB | Async-only. Transactional. Uses a command-channel pattern via `wasmt`. |
 //! | AWS S3 | Async-only. Uses `reqwest` with `wasm-bindgen` transport. |
@@ -70,6 +70,7 @@ use std::io;
 ///
 /// This macro is used internally by the `redb`, `fjall`, and `rocksdb` backends.
 #[cfg(feature = "tokio")]
+#[allow(unused_macros)]
 macro_rules! impl_async_kvdb_via_spawn_blocking {
     ($type:ty) => {
         #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait::async_trait)]
@@ -229,6 +230,7 @@ macro_rules! impl_async_kvdb_via_spawn_blocking {
 }
 
 #[cfg(feature = "tokio")]
+#[allow(unused_imports)]
 use impl_async_kvdb_via_spawn_blocking;
 
 #[cfg(feature = "transactional")]

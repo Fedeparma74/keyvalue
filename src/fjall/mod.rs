@@ -413,31 +413,52 @@ impl KeyValueDB for FjallDB {
 
         let inner = self.inner()?;
 
-        let mut write_tx = inner.write_tx();
+        // Fast-path: if the table is not soft-deleted, no cross-cutting
+        // topology change is involved and the fjall single-writer lock is
+        // sufficient to serialize the mutation.
+        let was_deleted = self
+            .deleted_tables
+            .read()
+            .map_err(|_| lock_poisoned())?
+            .contains(table);
 
-        let table_str = table.to_string();
-
-        // Check if this table was previously deleted
-        let was_deleted = {
-            let guard = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
-            guard.contains(&table_str)
-        };
-
-        if was_deleted {
-            // "Recreate" the table: remove from deleted list (both memory and persistent meta)
-            // Remove the deletion marker from _meta_deleted
-            let meta_ks = inner
-                .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
+        if !was_deleted {
+            let mut write_tx = inner.write_tx();
+            let ks = inner
+                .keyspace(table, || self.ks_options())
                 .map_err(io::Error::other)?;
-
-            write_tx.remove(&meta_ks, table.as_bytes());
+            let key_bytes = key.as_bytes();
+            let old = write_tx
+                .get(&ks, key_bytes)
+                .map_err(io::Error::other)?
+                .map(|v| v.to_vec());
+            write_tx.insert(&ks, key_bytes, value);
+            write_tx.commit().map_err(io::Error::other)?;
+            return Ok(old);
         }
 
-        // Now proceed with the insert (keyspace will be created/opened automatically)
+        // Slow-path: the table is soft-deleted and must be transparently
+        // un-deleted.  Hold the `deleted_tables` write lock from the disk
+        // commit through the in-memory update so that concurrent readers
+        // never observe the intermediate state (on-disk un-deleted but
+        // in-memory still marked deleted).
+        let mut deleted_guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
+        // Re-check: another writer may have undeleted it between the read
+        // lock release and the write lock acquire.
+        if !deleted_guard.contains(table) {
+            drop(deleted_guard);
+            return self.insert(table, key, value);
+        }
+
+        let mut write_tx = inner.write_tx();
+        let meta_ks = inner
+            .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
+            .map_err(io::Error::other)?;
+        write_tx.remove(&meta_ks, table.as_bytes());
+
         let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
-
         let key_bytes = key.as_bytes();
         let old = write_tx
             .get(&ks, key_bytes)
@@ -446,12 +467,7 @@ impl KeyValueDB for FjallDB {
         write_tx.insert(&ks, key_bytes, value);
         write_tx.commit().map_err(io::Error::other)?;
 
-        // Update in-memory state AFTER successful commit
-        if was_deleted {
-            let mut guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
-            guard.remove(&table_str);
-        }
-
+        deleted_guard.remove(table);
         Ok(old)
     }
     fn get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
@@ -694,26 +710,23 @@ impl KeyValueDB for FjallDB {
             ));
         }
 
-        // Skip if already deleted
-        {
-            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
-            if deleted_tables.contains(table) {
-                return Ok(());
-            }
-        }
-
         let inner = self.inner()?;
 
-        let mut write_tx = inner.write_tx();
-
+        // Hold the `deleted_tables` write lock from the persistent commit
+        // through the in-memory update so readers never observe an
+        // inconsistent "on-disk empty, in-memory not yet deleted" state.
+        let mut deleted_guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
+        if deleted_guard.contains(table) {
+            return Ok(());
+        }
         if !inner.keyspace_exists(table) {
             return Ok(());
         }
 
+        let mut write_tx = inner.write_tx();
         let ks = inner
             .keyspace(table, || self.ks_options())
             .map_err(io::Error::other)?;
-
         for item in write_tx.iter(&ks) {
             let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
             write_tx.remove(&ks, key_bytes);
@@ -722,74 +735,52 @@ impl KeyValueDB for FjallDB {
         let meta_ks = inner
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
-
         write_tx.insert(&meta_ks, table.as_bytes(), []);
-
         write_tx.commit().map_err(io::Error::other)?;
 
-        // Update global deleted tables set
-        {
-            let mut guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
-            guard.insert(table.to_string());
-        }
-
+        deleted_guard.insert(table.to_string());
         Ok(())
     }
 
     fn clear(&self) -> Result<(), io::Error> {
         let inner = self.inner()?;
-        // Exclude internal meta and deleted tables
-        let current_tables = {
-            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
-            inner
-                .list_keyspace_names()
-                .iter()
-                .filter_map(|n| {
-                    if n.as_ref() != META_DELETED_KEYSPACE && !deleted_tables.contains(n.as_ref()) {
-                        Some(n.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<String>>()
-        };
+
+        // Hold the `deleted_tables` write lock for the full critical section.
+        let mut deleted_guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
+
+        let current_tables: Vec<String> = inner
+            .list_keyspace_names()
+            .iter()
+            .filter_map(|n| {
+                if n.as_ref() != META_DELETED_KEYSPACE && !deleted_guard.contains(n.as_ref()) {
+                    Some(n.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         let meta_ks = inner
             .keyspace(META_DELETED_KEYSPACE, KeyspaceCreateOptions::default)
             .map_err(io::Error::other)?;
-
         let mut write_tx = inner.write_tx();
 
         for table_name in &current_tables {
-            if table_name == META_DELETED_KEYSPACE {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Cannot delete meta deleted keyspace",
-                ));
-            }
-
             let ks = inner
                 .keyspace(table_name, || self.ks_options())
                 .map_err(io::Error::other)?;
-
             for item in write_tx.iter(&ks) {
                 let (key_bytes, _) = item.into_inner().map_err(io::Error::other)?;
                 write_tx.remove(&ks, key_bytes);
             }
-
             write_tx.insert(&meta_ks, table_name.as_bytes(), []);
         }
 
         write_tx.commit().map_err(io::Error::other)?;
 
-        // Update global deleted tables set AFTER successful commit
-        {
-            let mut guard = self.deleted_tables.write().map_err(|_| lock_poisoned())?;
-            for table_name in current_tables {
-                guard.insert(table_name);
-            }
+        for table_name in current_tables {
+            deleted_guard.insert(table_name);
         }
-
         Ok(())
     }
 }

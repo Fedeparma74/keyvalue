@@ -329,9 +329,11 @@ impl AsyncTransactionalKVDB for SqliteDB {
     type ReadTransaction<'a> = ReadTransaction;
     type WriteTransaction<'a> = WriteTransaction;
     async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
-        // Open a separate connection for read isolation.
-        // With WAL mode, BEGIN DEFERRED gives us a snapshot as of the first read.
-        let read_conn = self.db().connect().map_err(io::Error::other)?;
+        // Each read transaction gets its own connection so it does not
+        // contend with the shared non-txn connection nor with concurrent
+        // writers.  With WAL mode, `BEGIN DEFERRED` gives us a consistent
+        // snapshot as of the first statement.
+        let read_conn = self.open_new_connection().await?;
         read_conn
             .execute("BEGIN DEFERRED", ())
             .await
@@ -339,11 +341,17 @@ impl AsyncTransactionalKVDB for SqliteDB {
         Ok(ReadTransaction { conn: read_conn })
     }
     async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
-        let conn = self.conn()?;
-        conn.execute("BEGIN IMMEDIATE", ())
+        // Each write transaction gets its own connection so it does not
+        // conflict with non-transactional operations (which would otherwise
+        // fail with "cannot start a transaction within a transaction").
+        let write_conn = self.open_new_connection().await?;
+        write_conn
+            .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(io::Error::other)?;
-        Ok(WriteTransaction { conn })
+        Ok(WriteTransaction {
+            conn: Arc::new(write_conn),
+        })
     }
 
     async fn try_recover(&self) -> Result<(), io::Error> {

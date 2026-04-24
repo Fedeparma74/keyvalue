@@ -329,28 +329,13 @@ impl AsyncKeyValueDB for AwsS3DB {
             None => table_prefix.clone(),
         };
 
-        // `start_after` strictly skips the provided key.  We use it for
-        // Excluded lower bounds; for Included lower bounds we still pass
-        // the predecessor + fetch the exact key separately when the bound
-        // key itself falls inside the prefix (handled below by including
-        // it unconditionally after the scan).
+        // `start_after` strictly skips the provided key, so it maps
+        // naturally to the Excluded bound.  For Included / Unbounded we
+        // rely on `range.contains` to filter the first page client-side;
+        // this avoids any fragile byte-level predecessor computation that
+        // could produce invalid UTF-8 on multi-byte keys.
         let start_after: Option<String> = match &range.lower {
-            crate::Bound::Unbounded => None,
-            crate::Bound::Included(k) => {
-                // Emulate inclusivity by asking S3 to skip the byte *before* k:
-                // start_after accepts any string, so we subtract a zero byte.
-                // If no predecessor is representable, fall back to None and
-                // rely on post-filtering.
-                let full = format!("{}{}", table_prefix, k);
-                let mut bytes = full.into_bytes();
-                if let Some(last) = bytes.last_mut()
-                    && *last > 0
-                {
-                    *last -= 1;
-                    bytes.push(0xFF);
-                }
-                String::from_utf8(bytes).ok()
-            }
+            crate::Bound::Unbounded | crate::Bound::Included(_) => None,
             crate::Bound::Excluded(k) => Some(format!("{}{}", table_prefix, k)),
         };
 
