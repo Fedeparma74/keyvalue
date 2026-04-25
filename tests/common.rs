@@ -854,6 +854,413 @@ pub fn test_transactional_ryow<D: keyvalue::TransactionalKVDB>(db: &D) {
     w.commit().unwrap();
 }
 
+/// Read-your-own-writes (RYOW) for prefix scans within a write tx.
+///
+/// Exercises the pattern:
+///   1. seed a base key under a shared prefix and commit;
+///   2. open a new write tx and overwrite the seeded key;
+///   3. `iter_from_prefix` must return the freshly-overwritten value, not
+///      the pre-tx snapshot value;
+///   4. inserting a fresh key under the same prefix must show up in the
+///      next prefix scan;
+///   5. removing a key inserted on disk must hide it from the prefix scan;
+///   6. keys outside the prefix must not leak into the result.
+///
+/// Some backends do not override `iter_from_prefix` on their write tx and
+/// rely on the trait default, which routes through `iter` — this test
+/// catches accidental regressions where pending writes are skipped on
+/// that path.
+#[cfg(feature = "transactional")]
+pub fn test_transactional_ryow_iter_from_prefix<D: keyvalue::TransactionalKVDB>(db: &D) {
+    use keyvalue::{KVReadTransaction, KVWriteTransaction};
+
+    // Seed a base entry so the prefix scan has something pre-existing.
+    {
+        let mut w = db.begin_write().unwrap();
+        w.insert("ryow_prefix", "grp_a/k1", b"v0_k1").unwrap();
+        w.commit().unwrap();
+    }
+
+    let mut write = db.begin_write().unwrap();
+
+    // ── Case 1: overwrite an existing key, then scan by prefix ──
+    write.insert("ryow_prefix", "grp_a/k1", b"v1_k1").unwrap();
+    let entries = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        entries.get("grp_a/k1").map(|v| v.as_slice()),
+        Some(b"v1_k1".as_slice()),
+        "RYOW: prefix scan must return the freshly-overwritten value, \
+         not the snapshot value from before the write"
+    );
+    assert_eq!(
+        entries.len(),
+        1,
+        "RYOW: prefix scan must NOT also return the stale snapshot value"
+    );
+
+    // ── Case 2: insert a fresh key under the same prefix, then scan ──
+    write.insert("ryow_prefix", "grp_a/k2", b"v1_k2").unwrap();
+    let entries = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        entries.len(),
+        2,
+        "RYOW: prefix scan must include the freshly-inserted key"
+    );
+    assert_eq!(
+        entries.get("grp_a/k1").map(|v| v.as_slice()),
+        Some(b"v1_k1".as_slice())
+    );
+    assert_eq!(
+        entries.get("grp_a/k2").map(|v| v.as_slice()),
+        Some(b"v1_k2".as_slice())
+    );
+
+    // ── Case 3: remove an entry that was already on disk, then scan ──
+    write.remove("ryow_prefix", "grp_a/k1").unwrap();
+    let entries = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert!(
+        !entries.contains_key("grp_a/k1"),
+        "RYOW: prefix scan must hide a key removed in the same tx"
+    );
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries.get("grp_a/k2").map(|v| v.as_slice()),
+        Some(b"v1_k2".as_slice())
+    );
+
+    // ── Case 4: keys outside the prefix must not leak in ──
+    write.insert("ryow_prefix", "grp_b/k1", b"v1_b_k1").unwrap();
+    let only_a = write.iter_from_prefix("ryow_prefix", "grp_a/").unwrap();
+    assert!(only_a.iter().all(|(k, _)| k.starts_with("grp_a/")));
+
+    write.commit().unwrap();
+
+    // Cleanup
+    let mut w = db.begin_write().unwrap();
+    w.clear().unwrap();
+    w.commit().unwrap();
+}
+
+/// Exhaustive RYOW audit: every read method on `KVReadTransaction` must
+/// reflect uncommitted writes/removes/deletes from the same write tx.
+///
+/// Covers the full read surface — `get`, `iter`, `iter_from_prefix`,
+/// `iter_range` (full + prefix-restricted), `iter_paginated`,
+/// `iter_from_prefix_paginated`, `keys`, `values`, `contains_key`,
+/// `contains_table`, `table_names` — under three independent scenarios:
+///   (a) overwrite of a pre-existing key — read must return the new value;
+///   (b) fresh insert (new key, possibly new table) — read must include it;
+///   (c) remove of a pre-existing key — read must hide it.
+///
+/// Also exercises `delete_table` followed by re-insertion within the same
+/// tx to catch backends that treat tables as physical entities and may
+/// fail to recreate them transactionally.
+#[cfg(feature = "transactional")]
+pub fn test_transactional_ryow_all_methods<D: keyvalue::TransactionalKVDB>(db: &D) {
+    use keyvalue::{Direction, KVReadTransaction, KVWriteTransaction, KeyRange};
+
+    {
+        let mut w = db.begin_write().unwrap();
+        w.insert("ryow_all", "k_overwrite", b"v0_overwrite")
+            .unwrap();
+        w.insert("ryow_all", "k_remove", b"v0_remove").unwrap();
+        w.commit().unwrap();
+    }
+
+    let mut write = db.begin_write().unwrap();
+    write
+        .insert("ryow_all", "k_overwrite", b"v1_overwrite")
+        .unwrap();
+    write.insert("ryow_all", "k_fresh", b"v1_fresh").unwrap();
+    write.remove("ryow_all", "k_remove").unwrap();
+    write.insert("ryow_new_table", "k_a", b"v_a").unwrap();
+    write.insert("ryow_new_table", "k_b", b"v_b").unwrap();
+
+    // get + contains_key
+    assert_eq!(
+        write.get("ryow_all", "k_overwrite").unwrap(),
+        Some(b"v1_overwrite".to_vec())
+    );
+    assert_eq!(write.get("ryow_all", "k_remove").unwrap(), None);
+    assert_eq!(
+        write.get("ryow_new_table", "k_a").unwrap(),
+        Some(b"v_a".to_vec())
+    );
+    assert!(write.contains_key("ryow_all", "k_overwrite").unwrap());
+    assert!(!write.contains_key("ryow_all", "k_remove").unwrap());
+
+    // iter
+    let entries: std::collections::HashMap<_, _> =
+        write.iter("ryow_all").unwrap().into_iter().collect();
+    assert_eq!(
+        entries.get("k_overwrite").map(|v| v.as_slice()),
+        Some(b"v1_overwrite".as_slice())
+    );
+    assert!(!entries.contains_key("k_remove"));
+
+    // iter_from_prefix (multi-hit + repeated overwrite)
+    write.insert("ryow_all", "px/a", b"px_a_v1").unwrap();
+    write.insert("ryow_all", "px/b", b"px_b_v1").unwrap();
+    write.insert("ryow_all", "px/a", b"px_a_v2").unwrap();
+    let prefix_entries: std::collections::HashMap<_, _> = write
+        .iter_from_prefix("ryow_all", "px/")
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(prefix_entries.len(), 2);
+    assert_eq!(
+        prefix_entries.get("px/a").map(|v| v.as_slice()),
+        Some(b"px_a_v2".as_slice())
+    );
+
+    // iter_range with prefix
+    let range_prefix: std::collections::HashMap<_, _> = write
+        .iter_range("ryow_all", KeyRange::prefix("px/"))
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(range_prefix.len(), 2);
+
+    // iter_paginated and iter_from_prefix_paginated default into iter_range
+    let pref_paginated: std::collections::HashMap<_, _> = write
+        .iter_from_prefix_paginated("ryow_all", "px/", None, 100, Direction::Forward)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(pref_paginated.len(), 2);
+
+    // keys / table_names / contains_table
+    let keys: std::collections::HashSet<_> = write.keys("ryow_all").unwrap().into_iter().collect();
+    assert!(!keys.contains("k_remove"));
+    assert!(keys.contains("k_overwrite"));
+
+    let names: std::collections::HashSet<_> = write.table_names().unwrap().into_iter().collect();
+    assert!(names.contains("ryow_new_table"));
+    assert!(write.contains_table("ryow_new_table").unwrap());
+
+    // delete_table within tx, then re-read + recreate
+    write.delete_table("ryow_new_table").unwrap();
+    assert!(!write.contains_table("ryow_new_table").unwrap());
+    assert!(write.iter("ryow_new_table").unwrap().is_empty());
+    assert!(write.get("ryow_new_table", "k_a").unwrap().is_none());
+    assert!(
+        !write
+            .table_names()
+            .unwrap()
+            .contains(&"ryow_new_table".to_string())
+    );
+    write.insert("ryow_new_table", "fresh", b"fresh_v").unwrap();
+    assert_eq!(
+        write.get("ryow_new_table", "fresh").unwrap(),
+        Some(b"fresh_v".to_vec())
+    );
+    assert!(write.contains_table("ryow_new_table").unwrap());
+
+    write.commit().unwrap();
+
+    // Cleanup
+    let mut w = db.begin_write().unwrap();
+    w.clear().unwrap();
+    w.commit().unwrap();
+}
+
+/// Async counterpart of `test_transactional_ryow_all_methods`.
+#[cfg(all(feature = "async", feature = "transactional"))]
+pub async fn test_async_transactional_ryow_all_methods<D: keyvalue::AsyncTransactionalKVDB>(
+    db: &D,
+) {
+    use keyvalue::{AsyncKVReadTransaction, AsyncKVWriteTransaction, Direction, KeyRange};
+
+    {
+        let mut w = db.begin_write().await.unwrap();
+        w.insert("ryow_all", "k_overwrite", b"v0_overwrite")
+            .await
+            .unwrap();
+        w.insert("ryow_all", "k_remove", b"v0_remove")
+            .await
+            .unwrap();
+        w.commit().await.unwrap();
+    }
+
+    let mut write = db.begin_write().await.unwrap();
+    write
+        .insert("ryow_all", "k_overwrite", b"v1_overwrite")
+        .await
+        .unwrap();
+    write
+        .insert("ryow_all", "k_fresh", b"v1_fresh")
+        .await
+        .unwrap();
+    write.remove("ryow_all", "k_remove").await.unwrap();
+    write.insert("ryow_new_table", "k_a", b"v_a").await.unwrap();
+
+    assert_eq!(
+        write.get("ryow_all", "k_overwrite").await.unwrap(),
+        Some(b"v1_overwrite".to_vec())
+    );
+    assert_eq!(write.get("ryow_all", "k_remove").await.unwrap(), None);
+    assert!(write.contains_key("ryow_all", "k_overwrite").await.unwrap());
+
+    let entries: std::collections::HashMap<_, _> =
+        write.iter("ryow_all").await.unwrap().into_iter().collect();
+    assert!(!entries.contains_key("k_remove"));
+    assert_eq!(
+        entries.get("k_overwrite").map(|v| v.as_slice()),
+        Some(b"v1_overwrite".as_slice())
+    );
+
+    write.insert("ryow_all", "px/a", b"px_a_v1").await.unwrap();
+    write.insert("ryow_all", "px/b", b"px_b_v1").await.unwrap();
+    write.insert("ryow_all", "px/a", b"px_a_v2").await.unwrap();
+    let prefix_entries: std::collections::HashMap<_, _> = write
+        .iter_from_prefix("ryow_all", "px/")
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(prefix_entries.len(), 2);
+    assert_eq!(
+        prefix_entries.get("px/a").map(|v| v.as_slice()),
+        Some(b"px_a_v2".as_slice())
+    );
+
+    let range_prefix: std::collections::HashMap<_, _> = write
+        .iter_range("ryow_all", KeyRange::prefix("px/"))
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(range_prefix.len(), 2);
+
+    let pref_paginated: std::collections::HashMap<_, _> = write
+        .iter_from_prefix_paginated("ryow_all", "px/", None, 100, Direction::Forward)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(pref_paginated.len(), 2);
+
+    let names: std::collections::HashSet<_> =
+        write.table_names().await.unwrap().into_iter().collect();
+    assert!(names.contains("ryow_new_table"));
+    assert!(write.contains_table("ryow_new_table").await.unwrap());
+
+    write.delete_table("ryow_new_table").await.unwrap();
+    assert!(!write.contains_table("ryow_new_table").await.unwrap());
+    assert!(write.iter("ryow_new_table").await.unwrap().is_empty());
+
+    write
+        .insert("ryow_new_table", "fresh", b"fresh_v")
+        .await
+        .unwrap();
+    assert_eq!(
+        write.get("ryow_new_table", "fresh").await.unwrap(),
+        Some(b"fresh_v".to_vec())
+    );
+
+    write.commit().await.unwrap();
+
+    let mut w = db.begin_write().await.unwrap();
+    w.clear().await.unwrap();
+    w.commit().await.unwrap();
+}
+
+/// Async counterpart of [`test_transactional_ryow_iter_from_prefix`].
+///
+/// Same scenario but exercised through the async trait — important because
+/// the async write tx for sync-backed backends typically wraps the inner
+/// sync write tx and routes `iter_from_prefix` back through the sync trait.
+/// If a backend overrides `iter_from_prefix` for its sync write tx but
+/// forgets to merge pending writes, the bug surfaces here even though the
+/// basic `get`/`iter`-based RYOW test above passes.
+#[cfg(all(feature = "async", feature = "transactional"))]
+pub async fn test_async_transactional_ryow_iter_from_prefix<D: keyvalue::AsyncTransactionalKVDB>(
+    db: &D,
+) {
+    use keyvalue::{AsyncKVReadTransaction, AsyncKVWriteTransaction};
+
+    {
+        let mut w = db.begin_write().await.unwrap();
+        w.insert("ryow_prefix", "grp_a/k1", b"v0_k1").await.unwrap();
+        w.commit().await.unwrap();
+    }
+
+    let mut write = db.begin_write().await.unwrap();
+
+    // overwrite then prefix-scan
+    write
+        .insert("ryow_prefix", "grp_a/k1", b"v1_k1")
+        .await
+        .unwrap();
+    let entries = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        entries.get("grp_a/k1").map(|v| v.as_slice()),
+        Some(b"v1_k1".as_slice()),
+        "async RYOW: prefix scan must return the freshly-overwritten value"
+    );
+    assert_eq!(entries.len(), 1);
+
+    // fresh insert visible
+    write
+        .insert("ryow_prefix", "grp_a/k2", b"v1_k2")
+        .await
+        .unwrap();
+    let entries = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries.get("grp_a/k2").map(|v| v.as_slice()),
+        Some(b"v1_k2".as_slice())
+    );
+
+    // removal visible
+    write.remove("ryow_prefix", "grp_a/k1").await.unwrap();
+    let entries = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, "grp_a/k2");
+
+    // out-of-prefix isolation
+    write
+        .insert("ryow_prefix", "grp_b/k1", b"v1_b_k1")
+        .await
+        .unwrap();
+    let only_a = write
+        .iter_from_prefix("ryow_prefix", "grp_a/")
+        .await
+        .unwrap();
+    assert!(only_a.iter().all(|(k, _)| k.starts_with("grp_a/")));
+
+    write.commit().await.unwrap();
+
+    let mut w = db.begin_write().await.unwrap();
+    w.clear().await.unwrap();
+    w.commit().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // AsyncTransactionalKVDB
 // ---------------------------------------------------------------------------

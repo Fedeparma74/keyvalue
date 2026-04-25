@@ -410,6 +410,70 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         }
         Ok(result)
     }
+
+    // Native prefix scan with explicit pending+snapshot merge.  We
+    // override the default trait impl (which would route through
+    // `iter()` and filter in-memory) for two reasons:
+    //   1. RYOW for the prefix scan is provably correct here regardless
+    //      of how `iter()` evolves — pending entries that match the
+    //      prefix shadow the snapshot directly in this method.
+    //   2. I/O is O(prefix) via fjall's native `Snapshot::prefix`,
+    //      instead of O(table) for the default — important when the
+    //      table holds many entries but the per-prefix slice is small.
+    fn iter_from_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        if table == META_DELETED_KEYSPACE {
+            return Ok(Vec::new());
+        }
+        let table_s = table.to_string();
+        if self.tx_deleted_tables.contains(&table_s) {
+            return Ok(Vec::new());
+        }
+        {
+            let guard = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?;
+            if guard.contains(table) {
+                return Ok(Vec::new());
+            }
+        }
+
+        // Pending overlay — keep only entries that match the prefix.
+        let mut map: HashMap<String, Option<Vec<u8>>> = self
+            .pending
+            .get(&table_s)
+            .map(|m| {
+                m.iter()
+                    .filter(|(k, _)| k.starts_with(prefix))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Native prefix scan over the snapshot; pending entries shadow.
+        if self.db.keyspace_exists(table) {
+            let ks = self
+                .db
+                .keyspace(table, || self.ks_options())
+                .map_err(io::Error::other)?;
+            for item in self.snapshot.prefix(&ks, prefix.as_bytes()) {
+                let (k, v) = item.into_inner().map_err(io::Error::other)?;
+                let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                map.entry(k_str).or_insert(Some(v.to_vec()));
+            }
+        }
+
+        let mut result: Vec<(String, Vec<u8>)> = map
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
+    }
 }
 
 impl<'a> KVWriteTransaction<'a> for WriteTransaction {
