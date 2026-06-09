@@ -397,4 +397,114 @@ impl AsyncKeyValueDB for AwsS3DB {
 
         Ok(result)
     }
+
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        validate_name("table name", table_name)?;
+
+        let table_prefix = format!("{}/", table_name);
+        let list_prefix = match &range.prefix {
+            Some(p) => format!("{}{}", table_prefix, p),
+            None => table_prefix.clone(),
+        };
+
+        // Reverse direction is not natively supported by S3's ListObjectsV2.
+        // List all matching keys (no object GETs) and apply the range
+        // client-side.
+        if range.direction == crate::Direction::Reverse {
+            let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut continuation_token: Option<String> = None;
+            loop {
+                let mut req = self
+                    .client
+                    .list_objects_v2()
+                    .bucket(&self.bucket_name)
+                    .prefix(&list_prefix);
+                if let Some(token) = &continuation_token {
+                    req = req.continuation_token(token);
+                }
+                let output = req
+                    .send()
+                    .await
+                    .map_err(|e| io::Error::other(format!("{:?}", e)))?;
+                for object in output.contents.unwrap_or_default() {
+                    let full_key = object.key.unwrap_or_default();
+                    if let Some(k) = full_key.strip_prefix(&table_prefix) {
+                        all.push((k.to_string(), Vec::new()));
+                    }
+                }
+                match output.next_continuation_token {
+                    Some(token) => continuation_token = Some(token),
+                    None => break,
+                }
+            }
+            return Ok(crate::apply_range_in_memory(all, &range)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect());
+        }
+
+        let start_after: Option<String> = match &range.lower {
+            crate::Bound::Unbounded | crate::Bound::Included(_) => None,
+            crate::Bound::Excluded(k) => Some(format!("{}{}", table_prefix, k)),
+        };
+
+        let limit = range.limit.unwrap_or(usize::MAX);
+        let mut result: Vec<String> = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        'outer: loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket_name)
+                .prefix(&list_prefix);
+            if let Some(sa) = &start_after {
+                req = req.start_after(sa);
+            }
+            if limit != usize::MAX {
+                let remaining = limit.saturating_sub(result.len());
+                let page = remaining.min(1000) as i32;
+                if page > 0 {
+                    req = req.max_keys(page);
+                }
+            }
+            if let Some(token) = &continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let output = req
+                .send()
+                .await
+                .map_err(|e| io::Error::other(format!("{:?}", e)))?;
+
+            for object in output.contents.unwrap_or_default() {
+                let full_key = object.key.unwrap_or_default();
+                let Some(key_in_table) = full_key.strip_prefix(&table_prefix) else {
+                    continue;
+                };
+                let key_owned = key_in_table.to_string();
+                if range.is_beyond_far_end(&key_owned) {
+                    break 'outer;
+                }
+                if !range.contains(&key_owned) {
+                    continue;
+                }
+                result.push(key_owned);
+                if result.len() >= limit {
+                    break 'outer;
+                }
+            }
+
+            match output.next_continuation_token {
+                Some(token) => continuation_token = Some(token),
+                None => break,
+            }
+        }
+
+        Ok(result)
+    }
 }

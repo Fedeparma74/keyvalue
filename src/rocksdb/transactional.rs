@@ -7,7 +7,9 @@ use rust_rocksdb::{Direction, IteratorMode, Options, SnapshotWithThreadMode, Wri
 
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
-use super::{DEFAULT_CF, Rocks, RocksDB, collect_rocks_range, rocks_iterator_mode};
+use super::{
+    DEFAULT_CF, Rocks, RocksDB, collect_rocks_range, collect_rocks_range_keys, rocks_iterator_mode,
+};
 
 // ---------------------------------------------------------------------------
 // Owned snapshot helper
@@ -182,6 +184,21 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
         let mode = rocks_iterator_mode(&range);
         collect_rocks_range(self.snapshot.iterator_cf(&cf, mode), &range)
     }
+
+    fn keys_range(&self, table: &str, range: crate::KeyRange) -> Result<Vec<String>, io::Error> {
+        if table == DEFAULT_CF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot use default column family as table",
+            ));
+        }
+        let cf = match self.db.cf_handle(table) {
+            Some(cf) => cf,
+            None => return Ok(Vec::new()),
+        };
+        let mode = rocks_iterator_mode(&range);
+        collect_rocks_range_keys(self.snapshot.iterator_cf(&cf, mode), &range)
+    }
 }
 
 impl<'a> KVReadTransaction<'a> for WriteTransaction {
@@ -343,8 +360,16 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         // Overlay pending on top of a range-restricted snapshot scan.
         let mut map = self.pending.get(&table_s).cloned().unwrap_or_default();
 
+        // With a `limit` set but no upper bound, `is_beyond_far_end` never
+        // fires, so cap the snapshot scan at `limit + pending_len` entries:
+        // at most `pending_len` pending keys can displace a snapshot key from
+        // the top-`limit`, so anything past that can never survive the final
+        // truncate.  Keeps a limited scan O(limit) instead of O(range).
+        let pending_len = map.len();
+        let scan_cap = range.limit.map(|l| l.saturating_add(pending_len));
         if let Some(cf) = self.db.cf_handle(table) {
             let mode = rocks_iterator_mode(&range);
+            let mut scanned: usize = 0;
             for item in self.snapshot.iterator_cf(&cf, mode) {
                 let (k, v) = item.map_err(io::Error::other)?;
                 let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
@@ -355,6 +380,12 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
                     continue;
                 }
                 map.entry(k_str).or_insert(Some(v.to_vec()));
+                scanned += 1;
+                if let Some(cap) = scan_cap
+                    && scanned >= cap
+                {
+                    break;
+                }
             }
         }
 
@@ -365,6 +396,70 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
             .filter(|(k, _)| range.contains(k))
             .collect();
         result.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if range.direction == crate::Direction::Reverse {
+            result.reverse();
+        }
+        if let Some(limit) = range.limit {
+            result.truncate(limit);
+        }
+        Ok(result)
+    }
+
+    fn keys_range(&self, table: &str, range: crate::KeyRange) -> Result<Vec<String>, io::Error> {
+        use std::collections::HashMap;
+
+        if table == DEFAULT_CF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot use default column family as table",
+            ));
+        }
+        let table_s = table.to_string();
+        if self.tx_deleted_tables.contains(&table_s) {
+            return Ok(Vec::new());
+        }
+
+        // Pending overlay as a presence map (key -> is-present; tombstones
+        // are `false`).  Snapshot scan only materialises keys; values are
+        // never copied.  scan_cap mirrors the iter_range optimisation: at
+        // most `pending_len` pending keys can displace a snapshot key from
+        // the top-`limit`.
+        let mut present: HashMap<String, bool> = self
+            .pending
+            .get(&table_s)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.is_some())).collect())
+            .unwrap_or_default();
+        let pending_len = present.len();
+        let scan_cap = range.limit.map(|l| l.saturating_add(pending_len));
+
+        if let Some(cf) = self.db.cf_handle(table) {
+            let mode = rocks_iterator_mode(&range);
+            let mut scanned: usize = 0;
+            for item in self.snapshot.iterator_cf(&cf, mode) {
+                let (k, _v) = item.map_err(io::Error::other)?;
+                let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                if range.is_beyond_far_end(&k_str) {
+                    break;
+                }
+                if !range.contains(&k_str) {
+                    continue;
+                }
+                present.entry(k_str).or_insert(true);
+                scanned += 1;
+                if let Some(cap) = scan_cap
+                    && scanned >= cap
+                {
+                    break;
+                }
+            }
+        }
+
+        let mut result: Vec<String> = present
+            .into_iter()
+            .filter_map(|(k, p)| if p { Some(k) } else { None })
+            .filter(|k| range.contains(k))
+            .collect();
+        result.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         if range.direction == crate::Direction::Reverse {
             result.reverse();
         }

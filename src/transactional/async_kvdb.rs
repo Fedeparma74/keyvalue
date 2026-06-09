@@ -109,6 +109,24 @@ pub trait AsyncKVReadTransaction<'a>: MaybeSendSync {
         self.iter_range(table_name, range).await
     }
 
+    /// Range scan returning only keys.
+    ///
+    /// The default routes through [`iter_range`](Self::iter_range) and
+    /// discards values.  Backends with a native key-only scan override this
+    /// to avoid materialising values at all.
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        Ok(self
+            .iter_range(table_name, range)
+            .await?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
     /// Cursor-based pagination returning only keys.
     async fn keys_paginated(
         &self,
@@ -117,12 +135,11 @@ pub trait AsyncKVReadTransaction<'a>: MaybeSendSync {
         limit: usize,
         direction: Direction,
     ) -> Result<Vec<String>, io::Error> {
-        Ok(self
-            .iter_paginated(table_name, start_after, limit, direction)
-            .await?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect())
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.keys_range(table_name, range).await
     }
 
     /// Cursor-based pagination returning only values.
@@ -380,6 +397,22 @@ where
         .await
         .map_err(io::Error::other)?
     }
+
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::keys_range(tx, &table_name, range)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
 }
 
 // -- AsyncKVReadTransaction for SpawnBlockingWriteTx<T> (read part of write tx) --
@@ -504,6 +537,22 @@ where
             let guard = inner.lock().map_err(|_| mutex_poisoned())?;
             let tx = guard.as_ref().ok_or_else(tx_consumed)?;
             KVReadTransaction::values(tx, &table_name)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        let inner = self.inner.clone();
+        let table_name = table_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock().map_err(|_| mutex_poisoned())?;
+            let tx = guard.as_ref().ok_or_else(tx_consumed)?;
+            KVReadTransaction::keys_range(tx, &table_name, range)
         })
         .await
         .map_err(io::Error::other)?

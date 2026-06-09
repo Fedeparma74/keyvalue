@@ -689,6 +689,72 @@ impl KeyValueDB for FjallDB {
         Ok(result)
     }
 
+    fn keys_range(&self, table: &str, range: crate::KeyRange) -> Result<Vec<String>, io::Error> {
+        use core::ops::Bound as OB;
+        use fjall::Readable;
+
+        if table == META_DELETED_KEYSPACE {
+            return Ok(Vec::new());
+        }
+        {
+            let deleted_tables = self.deleted_tables.read().map_err(|_| lock_poisoned())?;
+            if deleted_tables.contains(table) {
+                return Ok(Vec::new());
+            }
+        }
+        let inner = self.inner()?;
+        if !inner.keyspace_exists(table) {
+            return Ok(Vec::new());
+        }
+        let ks = inner
+            .keyspace(table, || self.ks_options())
+            .map_err(io::Error::other)?;
+
+        let lower = match &range.lower {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+        let upper = match &range.upper {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+
+        let snapshot = inner.read_tx();
+        let iter = snapshot.range(&ks, (lower, upper));
+        let limit = range.limit.unwrap_or(usize::MAX);
+        let mut result: Vec<String> = Vec::new();
+
+        macro_rules! process {
+            ($it:expr) => {
+                for item in $it {
+                    // `Guard::key` skips the value blob under key-value
+                    // separation.
+                    let k = item.key().map_err(io::Error::other)?;
+                    let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                    if range.is_beyond_far_end(&k_str) {
+                        break;
+                    }
+                    if !range.matches_prefix(&k_str) {
+                        continue;
+                    }
+                    result.push(k_str);
+                    if result.len() >= limit {
+                        break;
+                    }
+                }
+            };
+        }
+
+        match range.direction {
+            crate::Direction::Forward => process!(iter),
+            crate::Direction::Reverse => process!(iter.rev()),
+        }
+
+        Ok(result)
+    }
+
     fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
         if table == META_DELETED_KEYSPACE {
             return Ok(false);

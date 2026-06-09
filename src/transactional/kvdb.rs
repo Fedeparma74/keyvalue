@@ -111,6 +111,20 @@ pub trait KVReadTransaction<'a>: MaybeSendSync {
         self.iter_range(table_name, range)
     }
 
+    /// Range scan returning only keys.
+    ///
+    /// The default implementation routes through [`iter_range`](Self::iter_range)
+    /// and discards values.  Backends with a native key-only scan (e.g. fjall
+    /// key-value separation, an object-store key listing, an index-only SQL
+    /// projection) override this to avoid materialising values at all.
+    fn keys_range(&self, table_name: &str, range: KeyRange) -> Result<Vec<String>, io::Error> {
+        Ok(self
+            .iter_range(table_name, range)?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
     /// Cursor-based pagination returning only keys.
     fn keys_paginated(
         &self,
@@ -119,11 +133,11 @@ pub trait KVReadTransaction<'a>: MaybeSendSync {
         limit: usize,
         direction: Direction,
     ) -> Result<Vec<String>, io::Error> {
-        Ok(self
-            .iter_paginated(table_name, start_after, limit, direction)?
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect())
+        let mut range = KeyRange::all().with_direction(direction).with_limit(limit);
+        if let Some(k) = start_after {
+            range = range.start_after(k);
+        }
+        self.keys_range(table_name, range)
     }
 
     /// Cursor-based pagination returning only values.

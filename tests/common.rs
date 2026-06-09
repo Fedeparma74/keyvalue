@@ -2342,3 +2342,166 @@ pub async fn test_async_try_recover<D: keyvalue::AsyncTransactionalKVDB>(db: &D)
     write.clear().await.unwrap();
     write.commit().await.unwrap();
 }
+
+/// Exercises [`keyvalue::KVReadTransaction::keys_range`] on read and
+/// write transactions:
+///
+/// * Read tx: range + prefix + reverse + limit.
+/// * Write tx: snapshot + pending inserts + pending tombstones + RYOW
+///   (read-your-own-writes) under all four range knobs.
+/// * `keys_paginated` routes through `keys_range`.
+#[cfg(feature = "transactional")]
+pub fn test_transactional_keys_range<D: keyvalue::TransactionalKVDB>(db: &D) {
+    use keyvalue::{Bound, Direction, KVReadTransaction, KVWriteTransaction, KeyRange};
+
+    // Seed: k1..k5 in "r".
+    {
+        let mut w = db.begin_write().unwrap();
+        for i in 1u8..=5 {
+            w.insert("r", &format!("k{i}"), &[i]).unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    // -- ReadTransaction ----------------------------------------------------
+    {
+        let r = db.begin_read().unwrap();
+        let all = r.keys_range("r", KeyRange::all()).unwrap();
+        assert_eq!(all, vec!["k1", "k2", "k3", "k4", "k5"]);
+
+        let rev = r.keys_range("r", KeyRange::all().reverse()).unwrap();
+        assert_eq!(rev, vec!["k5", "k4", "k3", "k2", "k1"]);
+
+        let lim = r.keys_range("r", KeyRange::all().with_limit(3)).unwrap();
+        assert_eq!(lim, vec!["k1", "k2", "k3"]);
+
+        let bounded = r
+            .keys_range(
+                "r",
+                KeyRange::all()
+                    .with_lower(Bound::Included("k2".into()))
+                    .with_upper(Bound::Excluded("k5".into())),
+            )
+            .unwrap();
+        assert_eq!(bounded, vec!["k2", "k3", "k4"]);
+
+        let paginated = r.keys_paginated("r", None, 2, Direction::Forward).unwrap();
+        assert_eq!(paginated, vec!["k1", "k2"]);
+    }
+
+    // -- WriteTransaction with RYOW ----------------------------------------
+    {
+        let mut w = db.begin_write().unwrap();
+        // tombstone k2 and k4, insert k0 (before everything) and k6 (after).
+        w.remove("r", "k2").unwrap();
+        w.remove("r", "k4").unwrap();
+        w.insert("r", "k0", b"new").unwrap();
+        w.insert("r", "k6", b"new").unwrap();
+
+        let all = w.keys_range("r", KeyRange::all()).unwrap();
+        assert_eq!(all, vec!["k0", "k1", "k3", "k5", "k6"]);
+
+        let rev_lim = w
+            .keys_range("r", KeyRange::all().reverse().with_limit(2))
+            .unwrap();
+        assert_eq!(rev_lim, vec!["k6", "k5"]);
+
+        let bounded = w
+            .keys_range(
+                "r",
+                KeyRange::all()
+                    .with_lower(Bound::Included("k1".into()))
+                    .with_upper(Bound::Excluded("k6".into())),
+            )
+            .unwrap();
+        assert_eq!(bounded, vec!["k1", "k3", "k5"]);
+
+        let paginated = w.keys_paginated("r", None, 3, Direction::Forward).unwrap();
+        assert_eq!(paginated, vec!["k0", "k1", "k3"]);
+        w.abort().unwrap();
+    }
+
+    // -- Cleanup -----------------------------------------------------------
+    let mut w = db.begin_write().unwrap();
+    w.clear().unwrap();
+    w.commit().unwrap();
+}
+
+/// Async counterpart of [`test_transactional_keys_range`].
+#[cfg(all(feature = "async", feature = "transactional"))]
+pub async fn test_async_transactional_keys_range<D: keyvalue::AsyncTransactionalKVDB>(db: &D) {
+    use keyvalue::{AsyncKVReadTransaction, AsyncKVWriteTransaction, Bound, Direction, KeyRange};
+
+    {
+        let mut w = db.begin_write().await.unwrap();
+        for i in 1u8..=5 {
+            w.insert("r", &format!("k{i}"), &[i]).await.unwrap();
+        }
+        w.commit().await.unwrap();
+    }
+
+    {
+        let r = db.begin_read().await.unwrap();
+        let all = r.keys_range("r", KeyRange::all()).await.unwrap();
+        assert_eq!(all, vec!["k1", "k2", "k3", "k4", "k5"]);
+
+        let rev = r.keys_range("r", KeyRange::all().reverse()).await.unwrap();
+        assert_eq!(rev, vec!["k5", "k4", "k3", "k2", "k1"]);
+
+        let bounded = r
+            .keys_range(
+                "r",
+                KeyRange::all()
+                    .with_lower(Bound::Included("k2".into()))
+                    .with_upper(Bound::Excluded("k5".into())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bounded, vec!["k2", "k3", "k4"]);
+
+        let paginated = r
+            .keys_paginated("r", None, 2, Direction::Forward)
+            .await
+            .unwrap();
+        assert_eq!(paginated, vec!["k1", "k2"]);
+    }
+
+    {
+        let mut w = db.begin_write().await.unwrap();
+        w.remove("r", "k2").await.unwrap();
+        w.remove("r", "k4").await.unwrap();
+        w.insert("r", "k0", b"new").await.unwrap();
+        w.insert("r", "k6", b"new").await.unwrap();
+
+        let all = w.keys_range("r", KeyRange::all()).await.unwrap();
+        assert_eq!(all, vec!["k0", "k1", "k3", "k5", "k6"]);
+
+        let rev_lim = w
+            .keys_range("r", KeyRange::all().reverse().with_limit(2))
+            .await
+            .unwrap();
+        assert_eq!(rev_lim, vec!["k6", "k5"]);
+
+        let bounded = w
+            .keys_range(
+                "r",
+                KeyRange::all()
+                    .with_lower(Bound::Included("k1".into()))
+                    .with_upper(Bound::Excluded("k6".into())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bounded, vec!["k1", "k3", "k5"]);
+
+        let paginated = w
+            .keys_paginated("r", None, 3, Direction::Forward)
+            .await
+            .unwrap();
+        assert_eq!(paginated, vec!["k0", "k1", "k3"]);
+        w.abort().await.unwrap();
+    }
+
+    let mut w = db.begin_write().await.unwrap();
+    w.clear().await.unwrap();
+    w.commit().await.unwrap();
+}

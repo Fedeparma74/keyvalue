@@ -152,6 +152,34 @@ impl KeyValueDB for LocalStorageDB {
         Ok(key_values)
     }
 
+    fn keys_range(&self, table_name: &str, range: crate::KeyRange) -> io::Result<Vec<String>> {
+        validate_name("table name", table_name)?;
+        let prefix = format!("{}/{}/", self.name, table_name);
+
+        let local_storage = LocalStorage::raw();
+        let length = LocalStorage::length();
+
+        // Enumerate keys via the storage index only — values are never read.
+        let mut keys = Vec::new();
+        for i in 0..length {
+            let key = local_storage
+                .key(i)
+                .map_err(|e| {
+                    io::Error::other(format!("Failed to get key at index {}: {:?}", i, e))
+                })?
+                .unwrap_or_default();
+            if key.starts_with(&prefix) {
+                keys.push(key.replacen(&prefix, "", 1));
+            }
+        }
+
+        let items: Vec<(String, Vec<u8>)> = keys.into_iter().map(|k| (k, Vec::new())).collect();
+        Ok(crate::apply_range_in_memory(items, &range)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
         let prefix = format!("{}/", self.name);
 
@@ -273,6 +301,13 @@ impl crate::AsyncKeyValueDB for LocalStorageDB {
     }
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
         KeyValueDB::keys(self, table_name)
+    }
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        KeyValueDB::keys_range(self, table_name, range)
     }
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
         KeyValueDB::values(self, table_name)

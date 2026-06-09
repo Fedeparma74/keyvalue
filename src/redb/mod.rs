@@ -368,6 +368,21 @@ impl KeyValueDB for RedbDB {
         redb_collect_range(&table, &range)
     }
 
+    fn keys_range(&self, table_name: &str, range: crate::KeyRange) -> io::Result<Vec<String>> {
+        let read_transaction = self
+            .inner()?
+            .begin_read()
+            .map_err(transaction_error_to_io_error)?;
+        let table_res =
+            read_transaction.open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table = match table_res {
+            Ok(t) => t,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(table_error_to_io_error(e)),
+        };
+        redb_collect_range_keys(&table, &range)
+    }
+
     fn table_names(&self) -> Result<Vec<String>, io::Error> {
         let read_transaction = self
             .inner()?
@@ -551,6 +566,63 @@ where
                     continue;
                 }
                 result.push((k_str, v.value().to_vec()));
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        };
+    }
+
+    match range.direction {
+        crate::Direction::Forward => process!(iter),
+        crate::Direction::Reverse => process!(iter.rev()),
+    }
+
+    Ok(result)
+}
+
+/// Key-only counterpart of [`redb_collect_range`] — never materialises values.
+pub(super) fn redb_collect_range_keys<T>(
+    table: &T,
+    range: &crate::KeyRange,
+) -> io::Result<Vec<String>>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    use std::ops::Bound as OB;
+
+    let lower: OB<&str> = match &range.lower {
+        crate::Bound::Unbounded => OB::Unbounded,
+        crate::Bound::Included(k) => OB::Included(k.as_str()),
+        crate::Bound::Excluded(k) => OB::Excluded(k.as_str()),
+    };
+    let upper: OB<&str> = match &range.upper {
+        crate::Bound::Unbounded => OB::Unbounded,
+        crate::Bound::Included(k) => OB::Included(k.as_str()),
+        crate::Bound::Excluded(k) => OB::Excluded(k.as_str()),
+    };
+
+    let iter = table
+        .range::<&str>((lower, upper))
+        .map_err(storage_error_to_io_error)?;
+
+    let limit = range.limit.unwrap_or(usize::MAX);
+    let mut result = Vec::new();
+
+    macro_rules! process {
+        ($it:expr) => {
+            for item in $it {
+                // Only the key guard is read; the value bytes are never
+                // touched.
+                let (k, _) = item.map_err(storage_error_to_io_error)?;
+                let k_str = k.value().to_string();
+                if range.is_beyond_far_end(&k_str) {
+                    break;
+                }
+                if !range.matches_prefix(&k_str) {
+                    continue;
+                }
+                result.push(k_str);
                 if result.len() >= limit {
                     break;
                 }

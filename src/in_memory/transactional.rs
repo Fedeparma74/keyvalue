@@ -16,7 +16,7 @@ use std::io;
 
 use crate::{KVReadTransaction, KVWriteTransaction, KeyRange, TransactionalKVDB};
 
-use super::{InMemoryDB, Store, Table, collect_prefix, collect_range};
+use super::{InMemoryDB, Store, Table, collect_prefix, collect_range, collect_range_keys};
 
 // ---------------------------------------------------------------------------
 // Transaction types
@@ -111,6 +111,13 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
         }
     }
 
+    fn keys_range(&self, table_name: &str, range: KeyRange) -> Result<Vec<String>, io::Error> {
+        match self.snapshot.get(table_name) {
+            Some(table) => Ok(collect_range_keys(table, &range)),
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         Ok(self.snapshot.contains_key(table_name))
     }
@@ -197,6 +204,62 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         let table = self.materialize_table(table_name);
         Ok(collect_range(&table, &range))
+    }
+
+    fn keys_range(&self, table_name: &str, range: KeyRange) -> Result<Vec<String>, io::Error> {
+        // Build a key-presence set without cloning any value bytes.
+        // `false` = pending tombstone, `true` = present (in snapshot or
+        // pending insert).
+        use std::collections::BTreeMap;
+        let mut present: BTreeMap<String, bool> = BTreeMap::new();
+        let table_deleted = self.deleted_tables.contains(table_name);
+        if !table_deleted && let Some(t) = self.snapshot.get(table_name) {
+            for k in t.keys() {
+                present.insert(k.clone(), true);
+            }
+        }
+        if let Some(pending) = self.pending.get(table_name) {
+            for (k, v) in pending {
+                present.insert(k.clone(), v.is_some());
+            }
+        }
+        // Apply the range with collect_range_keys-like logic on the key set.
+        let bounds = super::std_range_bounds(&range);
+        let limit = range.limit.unwrap_or(usize::MAX);
+        let mut out: Vec<String> = Vec::new();
+        let push = |k: &String, out: &mut Vec<String>| -> bool {
+            if range.is_beyond_far_end(k) {
+                return false;
+            }
+            if !range.matches_prefix(k) {
+                return true;
+            }
+            out.push(k.clone());
+            out.len() < limit
+        };
+        match range.direction {
+            crate::Direction::Forward => {
+                for (k, p) in present.range(bounds) {
+                    if !p {
+                        continue;
+                    }
+                    if !push(k, &mut out) {
+                        break;
+                    }
+                }
+            }
+            crate::Direction::Reverse => {
+                for (k, p) in present.range(bounds).rev() {
+                    if !p {
+                        continue;
+                    }
+                    if !push(k, &mut out) {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {

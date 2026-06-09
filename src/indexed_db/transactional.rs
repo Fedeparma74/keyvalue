@@ -204,6 +204,84 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
 
         Err(io::Error::other("Unexpected response type"))
     }
+
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> io::Result<Vec<String>> {
+        // Native key-only fetch via IDB `getAllKeys`, then apply the range
+        // client-side.  No value blobs are touched.
+        let keys = read_all_keys(&self.command_request_sender, table_name).await?;
+        Ok(keys_apply_range(keys, &range))
+    }
+}
+
+/// Dispatches a read-only `getAllKeys` command via the actor channel and
+/// returns the raw key list.  Shared by read and write transactional
+/// `keys_range` implementations.
+async fn read_all_keys(
+    sender: &UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
+    table_name: &str,
+) -> io::Result<Vec<String>> {
+    let table_name = table_name.to_string();
+    let keys_closure = move |db: Rc<RwLock<Database>>| {
+        async move {
+            let db = db.read().await;
+            let table_name = table_name.to_string();
+            let keys = match db
+                .transaction(&[&table_name])
+                .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                    let table = tx.object_store(&table_name)?;
+                    let raw = table.get_all_keys(None).await?;
+                    Ok(raw
+                        .into_iter()
+                        .map(|k| k.as_string().unwrap_or_default())
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .map_err(indexed_db_error_to_io_error)
+            {
+                Ok(keys) => keys,
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::NotFound {
+                        return Ok(CommandResponse::Keys(Vec::new()));
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+            Ok::<_, io::Error>(CommandResponse::Keys(keys))
+        }
+        .boxed_local()
+    };
+
+    let (response_sender, response_receiver) = oneshot::channel();
+    sender
+        .unbounded_send((Box::new(keys_closure), response_sender))
+        .map_err(|_| io::Error::other("Failed to send command request"))?;
+    let response = response_receiver
+        .await
+        .map_err(|_| io::Error::other("Failed to receive command response"))?;
+    match response {
+        CommandResponse::Keys(keys) => Ok(keys),
+        CommandResponse::Error(e) => Err(e),
+        _ => Err(io::Error::other("Unexpected response type")),
+    }
+}
+
+/// Apply a [`crate::KeyRange`] to a raw key list — sort, filter, direction,
+/// limit.  Does not touch any values.
+fn keys_apply_range(keys: Vec<String>, range: &crate::KeyRange) -> Vec<String> {
+    let mut filtered: Vec<String> = keys.into_iter().filter(|k| range.contains(k)).collect();
+    filtered.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    if range.direction == crate::Direction::Reverse {
+        filtered.reverse();
+    }
+    if let Some(limit) = range.limit {
+        filtered.truncate(limit);
+    }
+    filtered
 }
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
@@ -549,6 +627,94 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         }
 
         Err(io::Error::other("Unexpected response type"))
+    }
+
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> io::Result<Vec<String>> {
+        let table_name_owned = table_name.to_string();
+        let operations = self.operations.clone();
+        let mut table_names = HashSet::new();
+        for (op_table_name, _) in &operations {
+            table_names.insert(op_table_name.clone());
+        }
+        table_names.insert(table_name_owned.clone());
+
+        let keys_closure = move |db: Rc<RwLock<Database>>| {
+            async move {
+                let db = db.read().await;
+                let collected = Rc::new(RefCell::new(Vec::<String>::new()));
+                let collected_clone = Rc::clone(&collected);
+
+                // Replay pending operations inside an rw-tx so RYOW is
+                // honoured, run `getAllKeys` on the target store (no value
+                // blobs are read), then deliberately abort the tx so no
+                // changes leak.
+                match db
+                    .transaction(
+                        &table_names
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<&str>>(),
+                    )
+                    .rw()
+                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
+                        let mut tables = HashMap::<String, Rc<ObjectStore<Infallible>>>::new();
+                        for (op_table_name, op) in operations {
+                            let table = if let Some(t) = tables.get(&op_table_name) {
+                                t.clone()
+                            } else {
+                                let t = Rc::new(tx.object_store(&op_table_name)?);
+                                tables.insert(op_table_name.clone(), Rc::clone(&t));
+                                t
+                            };
+                            op(table).await?;
+                        }
+                        let target = if let Some(t) = tables.get(&table_name_owned) {
+                            t.clone()
+                        } else {
+                            let t = Rc::new(tx.object_store(&table_name_owned)?);
+                            tables.insert(table_name_owned.clone(), Rc::clone(&t));
+                            t
+                        };
+                        for k in target.get_all_keys(None).await? {
+                            collected
+                                .borrow_mut()
+                                .push(k.as_string().unwrap_or_default());
+                        }
+                        Err::<(), indexed_db::Error<Infallible>>(indexed_db::Error::ReadOnly)
+                    })
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(indexed_db::Error::ReadOnly) => {} // expected abort
+                    Err(indexed_db::Error::DoesNotExist) => {
+                        // Target store absent → no keys.
+                        return Ok(CommandResponse::Keys(Vec::new()));
+                    }
+                    Err(e) => return Err(indexed_db_error_to_io_error(e)),
+                }
+
+                Ok::<_, io::Error>(CommandResponse::Keys(collected_clone.take()))
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(keys_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+        let keys = match response {
+            CommandResponse::Keys(keys) => keys,
+            CommandResponse::Error(e) => return Err(e),
+            _ => return Err(io::Error::other("Unexpected response type")),
+        };
+        Ok(keys_apply_range(keys, &range))
     }
 }
 

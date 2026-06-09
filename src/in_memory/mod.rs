@@ -107,6 +107,43 @@ pub(crate) fn collect_range(table: &Table, range: &KeyRange) -> Vec<(String, Vec
     out
 }
 
+/// Key-only counterpart of [`collect_range`] — never clones values.
+pub(crate) fn collect_range_keys(table: &Table, range: &KeyRange) -> Vec<String> {
+    let bounds = std_range_bounds(range);
+    let limit = range.limit.unwrap_or(usize::MAX);
+    let mut out: Vec<String> = Vec::new();
+
+    let push = |k: &String, out: &mut Vec<String>| -> bool {
+        if range.is_beyond_far_end(k) {
+            return false;
+        }
+        if !range.matches_prefix(k) {
+            return true;
+        }
+        out.push(k.clone());
+        out.len() < limit
+    };
+
+    match range.direction {
+        Direction::Forward => {
+            for (k, _) in table.range(bounds) {
+                if !push(k, &mut out) {
+                    break;
+                }
+            }
+        }
+        Direction::Reverse => {
+            for (k, _) in table.range(bounds).rev() {
+                if !push(k, &mut out) {
+                    break;
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// An in-memory key-value database.
 ///
 /// Cloning is cheap (the handle is refcounted) and all clones share the
@@ -273,6 +310,14 @@ impl KeyValueDB for InMemoryDB {
         let store = self.read()?;
         match store.get(table_name) {
             Some(table) => Ok(collect_range(table, &range)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn keys_range(&self, table_name: &str, range: KeyRange) -> Result<Vec<String>, io::Error> {
+        let store = self.read()?;
+        match store.get(table_name) {
+            Some(table) => Ok(collect_range_keys(table, &range)),
             None => Ok(Vec::new()),
         }
     }

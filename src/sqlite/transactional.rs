@@ -5,7 +5,9 @@ use turso::Connection;
 
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
-    sqlite::{build_range_sql, ensure_table, table_exists, validate_table_name},
+    sqlite::{
+        build_keys_range_sql, build_range_sql, ensure_table, table_exists, validate_table_name,
+    },
     transactional::WriteOp,
 };
 
@@ -111,6 +113,33 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
         }
         Ok(result)
     }
+
+    async fn keys_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        validate_table_name(table)?;
+        if !table_exists(&self.conn, table).await? {
+            return Ok(Vec::new());
+        }
+        let (sql, binds) = build_keys_range_sql(table, &range);
+        let mut stmt = self
+            .conn
+            .prepare(sql.as_str())
+            .await
+            .map_err(io::Error::other)?;
+        let mut rows = stmt
+            .query(turso::params_from_iter(binds))
+            .await
+            .map_err(io::Error::other)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(io::Error::other)? {
+            let key: String = row.get(0).map_err(io::Error::other)?;
+            result.push(key);
+        }
+        Ok(result)
+    }
 }
 
 impl ReadTransaction {
@@ -207,6 +236,33 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
             let key: String = row.get(0).map_err(io::Error::other)?;
             let val: Vec<u8> = row.get(1).map_err(io::Error::other)?;
             result.push((key, val));
+        }
+        Ok(result)
+    }
+
+    async fn keys_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        validate_table_name(table)?;
+        if !table_exists(&self.conn, table).await? {
+            return Ok(Vec::new());
+        }
+        let (sql, binds) = build_keys_range_sql(table, &range);
+        let mut stmt = self
+            .conn
+            .prepare(sql.as_str())
+            .await
+            .map_err(io::Error::other)?;
+        let mut rows = stmt
+            .query(turso::params_from_iter(binds))
+            .await
+            .map_err(io::Error::other)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(io::Error::other)? {
+            let key: String = row.get(0).map_err(io::Error::other)?;
+            result.push(key);
         }
         Ok(result)
     }

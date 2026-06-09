@@ -133,6 +133,20 @@ mod tests {
         common::test_transactional_ryow_all_methods(&db);
     }
 
+    #[cfg(all(feature = "transactional", feature = "in-memory"))]
+    #[test]
+    fn test_transactional_in_memory_keys_range() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_transactional_keys_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_transactional_in_memory_keys_range() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_transactional_keys_range(&db).await;
+    }
+
     #[cfg(all(feature = "async", feature = "transactional", feature = "in-memory"))]
     #[tokio::test]
     async fn test_async_transactional_in_memory_ryow_iter_from_prefix() {
@@ -368,6 +382,28 @@ mod tests {
             .join("test_transactional_redb_ryow_all_methods_db");
         let db = keyvalue::redb::RedbDB::open(&path).unwrap();
         common::test_transactional_ryow_all_methods(&db);
+    }
+
+    #[cfg(all(feature = "transactional", feature = "redb"))]
+    #[test]
+    fn test_transactional_redb_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_transactional_redb_keys_range_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_transactional_keys_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_transactional_redb_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_async_transactional_redb_keys_range_db");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_transactional_keys_range(&db).await;
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "redb"))]
@@ -618,6 +654,28 @@ mod tests {
         common::test_async_transactional_ryow_all_methods(&db).await;
     }
 
+    #[cfg(all(feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_transactional_fjall_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_transactional_fjall_keys_range_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_transactional_keys_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_transactional_fjall_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_async_transactional_fjall_keys_range_db");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_transactional_keys_range(&db).await;
+    }
+
     #[cfg(all(feature = "async", feature = "transactional", feature = "fjall"))]
     #[tokio::test]
     async fn test_async_transactional_fjall() {
@@ -855,6 +913,28 @@ mod tests {
         common::test_async_transactional_ryow_all_methods(&db).await;
     }
 
+    #[cfg(all(feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_transactional_rocksdb_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_transactional_rocksdb_keys_range_db");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_transactional_keys_range(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "rocksdb"))]
+    #[tokio::test]
+    async fn test_async_transactional_rocksdb_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_async_transactional_rocksdb_keys_range_db");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_transactional_keys_range(&db).await;
+    }
+
     #[cfg(all(feature = "async", feature = "transactional", feature = "rocksdb"))]
     #[tokio::test]
     async fn test_async_transactional_rocksdb() {
@@ -992,6 +1072,17 @@ mod tests {
             .join("test_async_transactional_sqlite_ryow_all_methods_db");
         let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
         common::test_async_transactional_ryow_all_methods(&db).await;
+    }
+
+    #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_transactional_sqlite_keys_range() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir
+            .path()
+            .join("test_async_transactional_sqlite_keys_range_db");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_transactional_keys_range(&db).await;
     }
 
     #[cfg(all(feature = "async", feature = "transactional", feature = "sqlite"))]

@@ -719,6 +719,21 @@ impl AsyncKeyValueDB for IndexedDB {
         Err(io::Error::other("Unexpected response type"))
     }
 
+    async fn keys_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        // Reuse the value-free `keys` path (IndexedDB `getAllKeys`), then
+        // apply the range client-side — no object values are fetched.
+        let keys = crate::AsyncKeyValueDB::keys(self, table_name).await?;
+        let items: Vec<(String, Vec<u8>)> = keys.into_iter().map(|k| (k, Vec::new())).collect();
+        Ok(crate::apply_range_in_memory(items, &range)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
         let table_name = table_name.to_string();
         let values_closure = move |db: Rc<RwLock<Database>>| {

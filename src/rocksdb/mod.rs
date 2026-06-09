@@ -1223,6 +1223,22 @@ impl KeyValueDB for RocksDB {
         rocks_collect_range(db, &cf, &range)
     }
 
+    fn keys_range(&self, table: &str, range: crate::KeyRange) -> Result<Vec<String>, io::Error> {
+        if table == DEFAULT_CF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot use default column family as table",
+            ));
+        }
+        let inner = self.inner()?;
+        let db = &*inner;
+        let cf = match db.cf_handle(table) {
+            Some(cf) => cf,
+            None => return Ok(Vec::new()),
+        };
+        rocks_collect_range_keys(db, &cf, &range)
+    }
+
     fn contains_table(&self, table: &str) -> Result<bool, io::Error> {
         if table == DEFAULT_CF {
             return Err(io::Error::new(
@@ -1287,6 +1303,16 @@ pub(super) fn rocks_collect_range(
     collect_rocks_range(db.iterator_cf(cf, mode), range)
 }
 
+/// Key-only counterpart of [`rocks_collect_range`].
+pub(super) fn rocks_collect_range_keys(
+    db: &Rocks,
+    cf: &impl rust_rocksdb::AsColumnFamilyRef,
+    range: &crate::KeyRange,
+) -> Result<Vec<String>, io::Error> {
+    let mode = rocks_iterator_mode(range);
+    collect_rocks_range_keys(db.iterator_cf(cf, mode), range)
+}
+
 /// Compute the initial seek position and direction for a [`crate::KeyRange`]
 /// on a RocksDB iterator.
 pub(super) fn rocks_iterator_mode(range: &crate::KeyRange) -> IteratorMode<'_> {
@@ -1344,6 +1370,49 @@ where
             continue;
         }
         result.push((k_str, v.to_vec()));
+        if result.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(result)
+}
+
+/// Key-only counterpart of [`collect_rocks_range`] — never copies value bytes.
+pub(super) fn collect_rocks_range_keys<I>(
+    iter: I,
+    range: &crate::KeyRange,
+) -> Result<Vec<String>, io::Error>
+where
+    I: IntoIterator<Item = Result<(Box<[u8]>, Box<[u8]>), rust_rocksdb::Error>>,
+{
+    let limit = range.limit.unwrap_or(usize::MAX);
+    let mut result = Vec::new();
+
+    for item in iter {
+        let (k, _v) = item.map_err(io::Error::other)?;
+        let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+        if !range.matches_lower(&k_str) {
+            if range.direction == crate::Direction::Forward {
+                continue;
+            } else {
+                break;
+            }
+        }
+        if !range.matches_upper(&k_str) {
+            if range.direction == crate::Direction::Reverse {
+                continue;
+            } else {
+                break;
+            }
+        }
+        if !range.matches_prefix(&k_str) {
+            if range.is_beyond_far_end(&k_str) {
+                break;
+            }
+            continue;
+        }
+        result.push(k_str);
         if result.len() >= limit {
             break;
         }

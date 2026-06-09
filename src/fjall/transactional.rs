@@ -213,6 +213,65 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
 
         Ok(result)
     }
+
+    fn keys_range(&self, table: &str, range: crate::KeyRange) -> Result<Vec<String>, io::Error> {
+        use core::ops::Bound as OB;
+
+        if table == META_DELETED_KEYSPACE || self.deleted_tables.contains(table) {
+            return Ok(Vec::new());
+        }
+        if !self.db.keyspace_exists(table) {
+            return Ok(Vec::new());
+        }
+        let ks = self
+            .db
+            .keyspace(table, || self.ks_options())
+            .map_err(io::Error::other)?;
+
+        let lower = match &range.lower {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+        let upper = match &range.upper {
+            crate::Bound::Unbounded => OB::Unbounded,
+            crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+            crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+        };
+
+        let iter = self.snapshot.range(&ks, (lower, upper));
+        let lim = range.limit.unwrap_or(usize::MAX);
+        let mut result: Vec<String> = Vec::new();
+
+        macro_rules! process {
+            ($it:expr) => {
+                for item in $it {
+                    // `Guard::key` resolves only the key; under fjall
+                    // key-value separation the value blob is never read,
+                    // so this scan stays O(keys) regardless of value size.
+                    let k = item.key().map_err(io::Error::other)?;
+                    let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                    if range.is_beyond_far_end(&k_str) {
+                        break;
+                    }
+                    if !range.matches_prefix(&k_str) {
+                        continue;
+                    }
+                    result.push(k_str);
+                    if result.len() >= lim {
+                        break;
+                    }
+                }
+            };
+        }
+
+        match range.direction {
+            crate::Direction::Forward => process!(iter),
+            crate::Direction::Reverse => process!(iter.rev()),
+        }
+
+        Ok(result)
+    }
 }
 
 impl<'a> KVReadTransaction<'a> for WriteTransaction {
@@ -364,9 +423,15 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
         // Start with pending entries for this table (small overlay).
         let mut map = self.pending.get(&table_s).cloned().unwrap_or_default();
 
-        // Native range scan over the snapshot; merges only keys not shadowed
-        // by the pending overlay.  The range is restricted at the backend
-        // level so I/O is O(range).
+        // Native range scan over the snapshot, merging only keys not shadowed
+        // by the pending overlay.  When a `limit` is set we only need the
+        // first `limit + pending_len` in-range snapshot entries scanned in the
+        // result direction: at most `pending_len` pending keys can displace a
+        // snapshot key from the top-`limit`, so anything beyond that can never
+        // survive the final truncate.  This keeps a limited scan O(limit) in
+        // values materialised instead of O(range).
+        let pending_len = map.len();
+        let scan_cap = range.limit.map(|l| l.saturating_add(pending_len));
         if self.db.keyspace_exists(table) {
             let ks = self
                 .db
@@ -384,13 +449,29 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
                 crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
             };
 
-            for item in self.snapshot.range(&ks, (lower, upper)) {
-                let (k, v) = item.into_inner().map_err(io::Error::other)?;
-                let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
-                if !range.matches_prefix(&k_str) {
-                    continue;
-                }
-                map.entry(k_str).or_insert(Some(v.to_vec()));
+            let iter = self.snapshot.range(&ks, (lower, upper));
+            let mut scanned: usize = 0;
+            macro_rules! scan {
+                ($it:expr) => {
+                    for item in $it {
+                        let (k, v) = item.into_inner().map_err(io::Error::other)?;
+                        let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                        if !range.matches_prefix(&k_str) {
+                            continue;
+                        }
+                        map.entry(k_str).or_insert(Some(v.to_vec()));
+                        scanned += 1;
+                        if let Some(cap) = scan_cap
+                            && scanned >= cap
+                        {
+                            break;
+                        }
+                    }
+                };
+            }
+            match range.direction {
+                crate::Direction::Forward => scan!(iter),
+                crate::Direction::Reverse => scan!(iter.rev()),
             }
         }
 
@@ -402,6 +483,94 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
             .filter(|(k, _)| range.contains(k))
             .collect();
         result.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if range.direction == crate::Direction::Reverse {
+            result.reverse();
+        }
+        if let Some(limit) = range.limit {
+            result.truncate(limit);
+        }
+        Ok(result)
+    }
+
+    fn keys_range(&self, table: &str, range: crate::KeyRange) -> Result<Vec<String>, io::Error> {
+        use core::ops::Bound as OB;
+
+        if table == META_DELETED_KEYSPACE {
+            return Ok(Vec::new());
+        }
+        let table_s = table.to_string();
+        if self.tx_deleted_tables.contains(&table_s) {
+            return Ok(Vec::new());
+        }
+        {
+            let guard = self
+                .global_deleted_tables
+                .read()
+                .map_err(|_| lock_poisoned())?;
+            if guard.contains(table) {
+                return Ok(Vec::new());
+            }
+        }
+
+        // Pending overlay as a presence map (key -> is-present; a tombstone
+        // is `false`).  Reading only the key from the snapshot keeps value
+        // blobs untouched under key-value separation.
+        let mut present: HashMap<String, bool> = self
+            .pending
+            .get(&table_s)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.is_some())).collect())
+            .unwrap_or_default();
+        let pending_len = present.len();
+        let scan_cap = range.limit.map(|l| l.saturating_add(pending_len));
+        if self.db.keyspace_exists(table) {
+            let ks = self
+                .db
+                .keyspace(table, || self.ks_options())
+                .map_err(io::Error::other)?;
+
+            let lower = match &range.lower {
+                crate::Bound::Unbounded => OB::Unbounded,
+                crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+                crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+            };
+            let upper = match &range.upper {
+                crate::Bound::Unbounded => OB::Unbounded,
+                crate::Bound::Included(k) => OB::Included(k.as_bytes().to_vec()),
+                crate::Bound::Excluded(k) => OB::Excluded(k.as_bytes().to_vec()),
+            };
+
+            let iter = self.snapshot.range(&ks, (lower, upper));
+            let mut scanned: usize = 0;
+            macro_rules! scan {
+                ($it:expr) => {
+                    for item in $it {
+                        let k = item.key().map_err(io::Error::other)?;
+                        let k_str = String::from_utf8(k.to_vec()).map_err(io::Error::other)?;
+                        if !range.matches_prefix(&k_str) {
+                            continue;
+                        }
+                        present.entry(k_str).or_insert(true);
+                        scanned += 1;
+                        if let Some(cap) = scan_cap
+                            && scanned >= cap
+                        {
+                            break;
+                        }
+                    }
+                };
+            }
+            match range.direction {
+                crate::Direction::Forward => scan!(iter),
+                crate::Direction::Reverse => scan!(iter.rev()),
+            }
+        }
+
+        let mut result: Vec<String> = present
+            .into_iter()
+            .filter_map(|(k, p)| if p { Some(k) } else { None })
+            .filter(|k| range.contains(k))
+            .collect();
+        result.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         if range.direction == crate::Direction::Reverse {
             result.reverse();
         }

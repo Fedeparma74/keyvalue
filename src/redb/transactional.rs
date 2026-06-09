@@ -7,8 +7,8 @@ use redb::{
 use crate::{KVReadTransaction, KVWriteTransaction, TransactionalKVDB};
 
 use super::{
-    RedbDB, commit_error_to_io_error, redb_collect_range, storage_error_to_io_error,
-    table_error_to_io_error, transaction_error_to_io_error,
+    RedbDB, commit_error_to_io_error, redb_collect_range, redb_collect_range_keys,
+    storage_error_to_io_error, table_error_to_io_error, transaction_error_to_io_error,
 };
 
 /// Read-only snapshot backed by a [`redb::ReadTransaction`].
@@ -77,6 +77,18 @@ impl<'a> KVReadTransaction<'a> for ReadTransaction {
             Err(e) => return Err(table_error_to_io_error(e)),
         };
         redb_collect_range(&table, &range)
+    }
+
+    fn keys_range(&self, table_name: &str, range: crate::KeyRange) -> io::Result<Vec<String>> {
+        let table_res = self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table = match table_res {
+            Ok(t) => t,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(table_error_to_io_error(e)),
+        };
+        redb_collect_range_keys(&table, &range)
     }
 
     fn table_names(&self) -> io::Result<Vec<String>> {
@@ -165,6 +177,21 @@ impl<'a> KVReadTransaction<'a> for WriteTransaction {
             Err(e) => return Err(table_error_to_io_error(e)),
         };
         redb_collect_range(&table, &range)
+    }
+
+    fn keys_range(&self, table_name: &str, range: crate::KeyRange) -> io::Result<Vec<String>> {
+        if !self.contains_table(table_name)? {
+            return Ok(Vec::new());
+        }
+        let table_res = self
+            .tx
+            .open_table(TableDefinition::<&str, &[u8]>::new(table_name));
+        let table = match table_res {
+            Ok(t) => t,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(table_error_to_io_error(e)),
+        };
+        redb_collect_range_keys(&table, &range)
     }
 
     fn table_names(&self) -> io::Result<Vec<String>> {

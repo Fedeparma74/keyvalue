@@ -428,6 +428,23 @@ fn escape_like(s: &str) -> String {
 /// injection; only the (already validated) table name and `ASC/DESC` are
 /// interpolated.
 pub(crate) fn build_range_sql(table: &str, range: &crate::KeyRange) -> (String, Vec<turso::Value>) {
+    build_range_sql_cols(table, range, "key, value")
+}
+
+/// Same as [`build_range_sql`] but projects only the `key` column, so a
+/// key-only scan never reads value blobs off disk.
+pub(crate) fn build_keys_range_sql(
+    table: &str,
+    range: &crate::KeyRange,
+) -> (String, Vec<turso::Value>) {
+    build_range_sql_cols(table, range, "key")
+}
+
+fn build_range_sql_cols(
+    table: &str,
+    range: &crate::KeyRange,
+    columns: &str,
+) -> (String, Vec<turso::Value>) {
     let mut where_clauses: Vec<&'static str> = Vec::new();
     let mut binds: Vec<turso::Value> = Vec::new();
 
@@ -473,8 +490,8 @@ pub(crate) fn build_range_sql(table: &str, range: &crate::KeyRange) -> (String, 
     };
 
     let sql = format!(
-        "SELECT key, value FROM \"{}\"{} ORDER BY key {}{}",
-        table, where_clause, order, limit_clause,
+        "SELECT {} FROM \"{}\"{} ORDER BY key {}{}",
+        columns, table, where_clause, order, limit_clause,
     );
     (sql, binds)
 }
@@ -796,6 +813,30 @@ impl AsyncKeyValueDB for SqliteDB {
             let key: String = row.get(0).map_err(io::Error::other)?;
             let val: Vec<u8> = row.get(1).map_err(io::Error::other)?;
             result.push((key, val));
+        }
+        Ok(result)
+    }
+
+    async fn keys_range(
+        &self,
+        table: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<String>, io::Error> {
+        validate_table_name(table)?;
+        let conn = self.conn().await;
+        if !table_exists(&conn, table).await? {
+            return Ok(Vec::new());
+        }
+        let (sql, binds) = build_keys_range_sql(table, &range);
+        let mut stmt = conn.prepare(&sql).await.map_err(io::Error::other)?;
+        let mut rows = stmt
+            .query(turso::params_from_iter(binds))
+            .await
+            .map_err(io::Error::other)?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await.map_err(io::Error::other)? {
+            let key: String = row.get(0).map_err(io::Error::other)?;
+            result.push(key);
         }
         Ok(result)
     }
