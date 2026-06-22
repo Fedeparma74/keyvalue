@@ -23,9 +23,9 @@
 //! ## Threading
 //!
 //! When the WASM binary is compiled with `target-feature = +atomics,
-//! +bulk-memory, +mutable-globals`, the background task is spawned on a
-//! Web Worker via [`wasmt::task::spawn`]; otherwise [`wasmt::task::spawn_local`]
-//! is used.
+//! +bulk-memory, +mutable-globals`, the background task is pinned to a
+//! Web Worker via [`wasmt::task::spawn_pinned`]; otherwise
+//! [`wasmt::task::spawn_local`] is used.
 
 use core::{convert::Infallible, pin::Pin};
 use std::{
@@ -105,7 +105,18 @@ pub struct IndexedDB {
     name: String,
     version: Arc<AtomicU32>,
     idb_dropper: Option<oneshot::Sender<()>>,
-    task_handle: wasmt::task::r#async::JoinHandle<()>,
+    #[cfg(all(
+        target_feature = "atomics",
+        target_feature = "bulk-memory",
+        target_feature = "mutable-globals"
+    ))]
+    task_handle: wasmt::task::JoinHandle<()>,
+    #[cfg(not(all(
+        target_feature = "atomics",
+        target_feature = "bulk-memory",
+        target_feature = "mutable-globals"
+    )))]
+    task_handle: wasmt::task::LocalJoinHandle<()>,
     command_request_sender:
         UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
 }
@@ -178,7 +189,7 @@ impl IndexedDB {
             target_feature = "bulk-memory",
             target_feature = "mutable-globals"
         ))]
-        let task_handle = wasmt::task::spawn(idb_task);
+        let task_handle = wasmt::task::spawn_pinned(move || idb_task);
 
         #[cfg(not(all(
             target_feature = "atomics",

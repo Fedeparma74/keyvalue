@@ -175,7 +175,7 @@ mod tests {
     ))]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn test_async_indexed_db_in_worker() {
-        wasmt::task::spawn(async move {
+        wasmt::task::spawn_pinned(|| async move {
             let name = "test_async_indexed_db_in_worker_db";
             let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
             futures::executor::block_on(common::test_async_db(&db));
