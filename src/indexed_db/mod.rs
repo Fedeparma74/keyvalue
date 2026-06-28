@@ -27,7 +27,7 @@
 //! Web Worker via [`wasmt::task::spawn_pinned`]; otherwise
 //! [`wasmt::task::spawn_local`] is used.
 
-use core::{convert::Infallible, pin::Pin};
+use core::{convert::Infallible, pin::Pin, task::Poll};
 use std::{
     io,
     rc::Rc,
@@ -35,13 +35,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::{
-    FutureExt, StreamExt,
-    channel::{mpsc::UnboundedSender, oneshot},
-};
+use futures::FutureExt;
 use indexed_db::{Database, Factory, Transaction, VersionChangeEvent};
 use js_sys::{Uint8Array, wasm_bindgen::JsValue};
-use tokio::sync::RwLock;
+use wasmt::sync::{RwLock, mpsc::UnboundedSender, oneshot};
 
 use crate::AsyncKeyValueDB;
 
@@ -131,14 +128,13 @@ impl Drop for IndexedDB {
 
 impl IndexedDB {
     pub async fn open(db_name: &str) -> io::Result<Self> {
-        let (init_res_sender, init_res_receiver) =
-            futures::channel::oneshot::channel::<io::Result<u32>>();
+        let (init_res_sender, init_res_receiver) = oneshot::channel::<io::Result<u32>>();
 
-        let (command_sender, mut command_receiver) = futures::channel::mpsc::unbounded::<(
+        let (command_sender, mut command_receiver) = wasmt::sync::mpsc::unbounded_channel::<(
             CommandRequestClosure,
             oneshot::Sender<CommandResponse>,
         )>();
-        let (idb_dropper, mut idb_dropper_receiver) = futures::channel::oneshot::channel::<()>();
+        let (idb_dropper, mut idb_dropper_receiver) = oneshot::channel::<()>();
 
         let db_name_clone = db_name.to_string();
         let idb_task = async move {
@@ -165,20 +161,25 @@ impl IndexedDB {
             init_res_sender.send(Ok(db_version)).ok();
 
             loop {
-                futures::select! {
-                    (command, command_response_sender) = command_receiver.select_next_some() => {
-                        match command(db.clone()).await {
-                            Ok(response) => {
-                                command_response_sender.send(response).ok();
-                            }
-                            Err(e) => {
-                                command_response_sender.send(CommandResponse::Error(e)).ok();
-                            }
-                        }
+                let next = futures::future::poll_fn(|cx| {
+                    if Pin::new(&mut idb_dropper_receiver).poll(cx).is_ready() {
+                        return Poll::Ready(None);
                     }
-                    _ = idb_dropper_receiver => {
-                        db.read().await.close();
-                        return;
+                    command_receiver.poll_recv(cx)
+                })
+                .await;
+
+                let Some((command, command_response_sender)) = next else {
+                    db.read().await.close();
+                    return;
+                };
+
+                match command(db.clone()).await {
+                    Ok(response) => {
+                        command_response_sender.send(response).ok();
+                    }
+                    Err(e) => {
+                        command_response_sender.send(CommandResponse::Error(e)).ok();
                     }
                 }
             }
@@ -245,7 +246,7 @@ impl IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(recover_closure), response_sender))
+            .send((Box::new(recover_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send recovery command"))?;
 
         let response = response_receiver
@@ -328,7 +329,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(insert_closure), response_sender))
+            .send((Box::new(insert_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -382,7 +383,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(get_closure), response_sender))
+            .send((Box::new(get_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -461,7 +462,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
             let (response_sender, response_receiver) = oneshot::channel();
             self.command_request_sender
-                .unbounded_send((Box::new(remove_closure), response_sender))
+                .send((Box::new(remove_closure), response_sender))
                 .map_err(|_| io::Error::other("Failed to send command request"))?;
 
             let response = response_receiver
@@ -524,7 +525,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(iter_closure), response_sender))
+            .send((Box::new(iter_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -552,7 +553,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(table_names_closure), response_sender))
+            .send((Box::new(table_names_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
         let response = response_receiver
             .await
@@ -607,7 +608,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(delete_table_closure), response_sender))
+            .send((Box::new(delete_table_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -659,7 +660,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(contains_key_closure), response_sender))
+            .send((Box::new(contains_key_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -713,7 +714,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(keys_closure), response_sender))
+            .send((Box::new(keys_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -782,7 +783,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(values_closure), response_sender))
+            .send((Box::new(values_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -828,7 +829,7 @@ impl AsyncKeyValueDB for IndexedDB {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(clear_closure), response_sender))
+            .send((Box::new(clear_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver

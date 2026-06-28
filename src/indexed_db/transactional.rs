@@ -10,13 +10,10 @@ use std::{
 
 use async_trait::async_trait;
 
-use futures::{
-    FutureExt,
-    channel::{mpsc::UnboundedSender, oneshot},
-};
+use futures::FutureExt;
 use indexed_db::{Database, Factory, ObjectStore, Transaction, VersionChangeEvent};
 use js_sys::{Uint8Array, wasm_bindgen::JsValue};
-use tokio::sync::RwLock;
+use wasmt::sync::{RwLock, mpsc::UnboundedSender, oneshot};
 
 use crate::{
     AsyncKVReadTransaction, AsyncKVWriteTransaction, AsyncTransactionalKVDB,
@@ -168,7 +165,7 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(get_closure), response_sender))
+            .send((Box::new(get_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -226,7 +223,7 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(iter_closure), response_sender))
+            .send((Box::new(iter_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
@@ -254,7 +251,7 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(table_names_closure), response_sender))
+            .send((Box::new(table_names_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
         let response = response_receiver
             .await
@@ -323,7 +320,7 @@ async fn read_all_keys(
 
     let (response_sender, response_receiver) = oneshot::channel();
     sender
-        .unbounded_send((Box::new(keys_closure), response_sender))
+        .send((Box::new(keys_closure), response_sender))
         .map_err(|_| io::Error::other("Failed to send command request"))?;
     let response = response_receiver
         .await
@@ -648,7 +645,7 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
 
         let (response_sender, response_receiver) = oneshot::channel();
         self.command_request_sender
-            .unbounded_send((Box::new(commit_closure), response_sender))
+            .send((Box::new(commit_closure), response_sender))
             .map_err(|_| io::Error::other("Failed to send command request"))?;
 
         let response = response_receiver
