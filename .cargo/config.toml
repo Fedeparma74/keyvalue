@@ -26,6 +26,3 @@ git-fetch-with-cli = true
 #     '--cfg',
 #     'getrandom_backend="wasm_js"',
 # ]
-
-[env]
-WASMT_WASM_PKG = "../../wasm-bindgen-test"

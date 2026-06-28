@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert::Infallible,
     io,
     pin::Pin,
@@ -37,6 +37,57 @@ enum TableUpdate {
     Deleted(String), // table name
 }
 
+/// In-memory mirror of a [`WriteTransaction`]'s queued operations, kept so reads
+/// (`get`/`iter`/`table_names`/`keys_range`) can be answered from the committed
+/// database plus this overlay in O(1)/O(table) time.
+///
+/// Without it, every read replays the *entire* pending-operation log inside an
+/// aborted read-write transaction to honour read-your-own-writes.
+#[derive(Default)]
+struct WriteOverlay {
+    /// `table -> key -> Some(value)` for a pending put, or `None` for a pending
+    /// delete (tombstone).
+    writes: HashMap<String, HashMap<String, Option<Vec<u8>>>>,
+    /// Tables emptied by `delete_table`/`clear` since the transaction began:
+    /// their committed rows are invisible to reads; only entries re-added
+    /// afterwards (present in `writes`) show through.
+    cleared_tables: HashSet<String>,
+}
+
+impl WriteOverlay {
+    fn put(&mut self, table_name: &str, key: &str, value: Vec<u8>) {
+        self.writes
+            .entry(table_name.to_string())
+            .or_default()
+            .insert(key.to_string(), Some(value));
+    }
+
+    fn tombstone(&mut self, table_name: &str, key: &str) {
+        self.writes
+            .entry(table_name.to_string())
+            .or_default()
+            .insert(key.to_string(), None);
+    }
+
+    fn delete_table(&mut self, table_name: &str) {
+        self.writes.remove(table_name);
+        self.cleared_tables.insert(table_name.to_string());
+    }
+
+    /// `Some(opt)` when the overlay fully determines the value (`opt` is the
+    /// pending value, or `None` for a deleted/cleared key); `None` when the read
+    /// must consult the committed database.
+    fn resolve(&self, table_name: &str, key: &str) -> Option<Option<Vec<u8>>> {
+        if let Some(value) = self.writes.get(table_name).and_then(|t| t.get(key)) {
+            return Some(value.clone());
+        }
+        if self.cleared_tables.contains(table_name) {
+            return Some(None);
+        }
+        None
+    }
+}
+
 /// Read-only IndexedDB transaction.
 ///
 /// Reads are dispatched through the shared command channel and executed
@@ -50,8 +101,11 @@ pub struct ReadTransaction {
 ///
 /// Write operations are collected in `operations` and replayed inside a
 /// single read-write IDB transaction on [`commit`](AsyncKVWriteTransaction::commit).
-/// Reads replay pending writes first (inside an aborted rw-transaction) to
-/// provide read-your-own-write semantics.
+/// Reads are answered from the committed database merged with [`overlay`], an
+/// in-memory mirror of the pending writes, giving read-your-own-write semantics
+/// without replaying the operation log on every read.
+///
+/// [`overlay`]: WriteOverlay
 pub struct WriteTransaction {
     name: String,
     version: Arc<AtomicU32>,
@@ -61,6 +115,17 @@ pub struct WriteTransaction {
         String, // table name
         Arc<WriteOperation>,
     )>,
+    overlay: WriteOverlay,
+}
+
+impl WriteTransaction {
+    /// A read-only view of the *committed* database (pending writes excluded).
+    /// Reads merge its results with [`Self::overlay`].
+    fn committed(&self) -> ReadTransaction {
+        ReadTransaction {
+            command_request_sender: self.command_request_sender.clone(),
+        }
+    }
 }
 
 #[cfg_attr(all(not(target_arch = "wasm32"), feature = "std"), async_trait)]
@@ -288,345 +353,52 @@ fn keys_apply_range(keys: Vec<String>, range: &crate::KeyRange) -> Vec<String> {
 #[cfg_attr(any(target_arch = "wasm32", not(feature = "std")), async_trait(?Send))]
 impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
     async fn get(&self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let table_name = table_name.to_string();
-        let key = key.to_string();
-        let operations = self.operations.clone();
-        let mut table_names = HashSet::new();
-        for (op_table_name, _) in &operations {
-            table_names.insert(op_table_name.clone());
+        if let Some(resolved) = self.overlay.resolve(table_name, key) {
+            return Ok(resolved);
         }
-        table_names.insert(table_name.clone());
-        let name = self.name.clone();
-        let version = self.version.clone();
-        let get_closure = move |db: Rc<RwLock<Database>>| {
-            async move {
-                let mut db = db.write().await;
-
-                // create object stores if they do not exist
-                let new_table_names: Vec<String> = table_names
-                    .difference(&db.object_store_names().into_iter().collect())
-                    .cloned()
-                    .collect();
-
-                if !new_table_names.is_empty() {
-                    db.close();
-
-                    let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current
-                        .checked_add(1)
-                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
-                    version.store(new_version, std::sync::atomic::Ordering::SeqCst);
-
-                    let new_table_names = new_table_names.clone();
-                    *db = Factory::get()
-                        .map_err(indexed_db_error_to_io_error)?
-                        .open::<Infallible>(
-                            &name,
-                            new_version,
-                            move |evt: VersionChangeEvent<Infallible>| async move {
-                                for table_name in new_table_names {
-                                    evt.build_object_store(&table_name).create()?;
-                                }
-                                Ok(())
-                            },
-                        )
-                        .await
-                        .map_err(indexed_db_error_to_io_error)?
-                        .into_manual_close();
-                }
-
-                let table_name = table_name.to_string();
-                let key = key.to_string();
-                let value = Rc::new(RefCell::new(None));
-                let value_clone = Rc::clone(&value);
-                match db
-                    .transaction(
-                        &table_names
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<&str>>(),
-                    )
-                    .rw()
-                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                        // cache opened tables
-                        let mut tables = HashMap::<String, Rc<ObjectStore<Infallible>>>::new();
-
-                        // perform all queued operations first
-                        for (op_table_name, op) in operations {
-                            let table = if let Some(t) = tables.get(&op_table_name) {
-                                t.clone()
-                            } else {
-                                let t = Rc::new(tx.object_store(&op_table_name)?);
-                                tables.insert(op_table_name.clone(), Rc::clone(&t));
-                                t
-                            };
-
-                            op(table).await?;
-                        }
-
-                        // now perform the get
-                        let table = if let Some(t) = tables.get(&table_name) {
-                            t.clone()
-                        } else {
-                            let t = Rc::new(tx.object_store(&table_name)?);
-                            tables.insert(table_name.clone(), Rc::clone(&t));
-                            t
-                        };
-
-                        value.replace(table.get(&JsValue::from(key)).await?);
-
-                        Err::<(), indexed_db::Error<Infallible>>(indexed_db::Error::ReadOnly)
-                    })
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        if let indexed_db::Error::DoesNotExist = e {
-                            return Ok(CommandResponse::Get(None));
-                        } else if let indexed_db::Error::ReadOnly = e {
-                            // Expected error to abort the transaction after reads
-                        } else {
-                            return Err(indexed_db_error_to_io_error(e));
-                        }
-                    }
-                };
-
-                // if new object stores were created, delete them, as we have not committed yet
-                if !new_table_names.is_empty() {
-                    db.close();
-
-                    let current = version.load(std::sync::atomic::Ordering::SeqCst);
-                    let new_version = current
-                        .checked_add(1)
-                        .ok_or_else(|| io::Error::other("IndexedDB version overflow"))?;
-                    version.store(new_version, std::sync::atomic::Ordering::SeqCst);
-                    *db = Factory::get()
-                        .map_err(indexed_db_error_to_io_error)?
-                        .open::<Infallible>(
-                            &name,
-                            new_version,
-                            move |evt: VersionChangeEvent<Infallible>| async move {
-                                for table_name in new_table_names {
-                                    evt.delete_object_store(&table_name)?;
-                                }
-                                Ok(())
-                            },
-                        )
-                        .await
-                        .map_err(indexed_db_error_to_io_error)?
-                        .into_manual_close();
-                }
-
-                Ok::<_, std::io::Error>(CommandResponse::Get(
-                    value_clone.take().map(|v| Uint8Array::from(v).to_vec()),
-                ))
-            }
-            .boxed_local()
-        };
-
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.command_request_sender
-            .unbounded_send((Box::new(get_closure), response_sender))
-            .map_err(|_| io::Error::other("Failed to send command request"))?;
-
-        let response = response_receiver
-            .await
-            .map_err(|_| io::Error::other("Failed to receive command response"))?;
-
-        if let CommandResponse::Get(value) = response {
-            return Ok(value);
-        }
-        if let CommandResponse::Error(e) = response {
-            return Err(e);
-        }
-
-        Err(io::Error::other("Unexpected response type"))
+        self.committed().get(table_name, key).await
     }
 
     async fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
-        let table_name = table_name.to_string();
-        let operations = self.operations.clone();
-        let mut table_names = HashSet::new();
-        for (op_table_name, _) in &operations {
-            table_names.insert(op_table_name.clone());
-        }
-        table_names.insert(table_name.clone());
-        let iter_closure = move |db: Rc<RwLock<Database>>| {
-            async move {
-                let db = db.read().await;
-                let table_name = table_name.to_string();
-                let values = Rc::new(RefCell::new(Vec::new()));
-                let values_clone = Rc::clone(&values);
-                match db
-                    .transaction(
-                        &table_names
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<&str>>(),
-                    )
-                    .rw()
-                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                        // cache opened tables
-                        let mut tables = HashMap::<String, Rc<ObjectStore<Infallible>>>::new();
-
-                        // perform all queued operations first
-                        for (op_table_name, op) in operations {
-                            let table = if let Some(t) = tables.get(&op_table_name) {
-                                t.clone()
-                            } else {
-                                let t = Rc::new(tx.object_store(&op_table_name)?);
-                                tables.insert(op_table_name.clone(), Rc::clone(&t));
-                                t
-                            };
-
-                            op(table).await?;
-                        }
-
-                        // now perform the iter
-                        let table = if let Some(t) = tables.get(&table_name) {
-                            t.clone()
-                        } else {
-                            let t = Rc::new(tx.object_store(&table_name)?);
-                            tables.insert(table_name.clone(), Rc::clone(&t));
-                            t
-                        };
-
-                        for key in table.get_all_keys(None).await? {
-                            if let Some(value) = table.get(&key).await? {
-                                let key = key.as_string().unwrap_or_default();
-                                let value = Uint8Array::from(value).to_vec();
-                                values.borrow_mut().push((key, value));
-                            }
-                        }
-
-                        Err::<(), indexed_db::Error<Infallible>>(indexed_db::Error::ReadOnly)
-                    })
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        if let indexed_db::Error::DoesNotExist = e {
-                            // Table does not exist, return empty iterator
-                        } else if let indexed_db::Error::ReadOnly = e {
-                            // Expected error to abort the transaction after reads
-                        } else {
-                            return Err(indexed_db_error_to_io_error(e));
-                        }
-                    }
-                };
-
-                Ok::<_, std::io::Error>(CommandResponse::Iter(values_clone.take()))
-            }
-            .boxed_local()
+        // Committed rows (skipped if the table was cleared in this tx), then the
+        // pending writes layered on top — puts override, tombstones drop.
+        let base = if self.overlay.cleared_tables.contains(table_name) {
+            Vec::new()
+        } else {
+            self.committed().iter(table_name).await?
         };
-
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.command_request_sender
-            .unbounded_send((Box::new(iter_closure), response_sender))
-            .map_err(|_| io::Error::other("Failed to send command request"))?;
-
-        let response = response_receiver
-            .await
-            .map_err(|_| io::Error::other("Failed to receive command response"))?;
-
-        if let CommandResponse::Iter(values) = response {
-            return Ok(values);
+        let mut merged: BTreeMap<String, Vec<u8>> = base.into_iter().collect();
+        if let Some(writes) = self.overlay.writes.get(table_name) {
+            for (key, value) in writes {
+                match value {
+                    Some(value) => {
+                        merged.insert(key.clone(), value.clone());
+                    }
+                    None => {
+                        merged.remove(key);
+                    }
+                }
+            }
         }
-        if let CommandResponse::Error(e) = response {
-            return Err(e);
-        }
-
-        Err(io::Error::other("Unexpected response type"))
+        Ok(merged.into_iter().collect())
     }
 
     async fn table_names(&self) -> io::Result<Vec<String>> {
-        let operations = self.operations.clone();
-        let mut table_names = HashSet::new();
-        for (op_table_name, _) in &operations {
-            table_names.insert(op_table_name.clone());
-        }
-        let table_names_closure = |db: Rc<RwLock<Database>>| {
-            async move {
-                let db = db.read().await;
-                let mut table_names_list = HashSet::new();
-                table_names_list.extend(db.object_store_names());
-                let table_names_list = Rc::new(RefCell::new(table_names_list));
-                let table_names_list_clone = Rc::clone(&table_names_list);
-                if !table_names.is_empty() {
-                    match db
-                        .transaction(
-                            &table_names
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<&str>>(),
-                        )
-                        .rw()
-                        .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                            // cache opened tables
-                            let mut tables = HashMap::<String, Rc<ObjectStore<Infallible>>>::new();
-
-                            // perform all queued operations first
-                            for (op_table_name, op) in operations {
-                                let table = if let Some(t) = tables.get(&op_table_name) {
-                                    t.clone()
-                                } else {
-                                    let t = Rc::new(tx.object_store(&op_table_name)?);
-                                    tables.insert(op_table_name.clone(), Rc::clone(&t));
-                                    t
-                                };
-
-                                if let Some(table_update) = op(table).await? {
-                                    match table_update {
-                                        TableUpdate::Created(name) => {
-                                            table_names_list.borrow_mut().insert(name);
-                                        }
-                                        TableUpdate::Deleted(name) => {
-                                            table_names_list.borrow_mut().remove(&name);
-                                        }
-                                    }
-                                }
-                            }
-
-                            Err::<(), indexed_db::Error<Infallible>>(indexed_db::Error::ReadOnly)
-                        })
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(e) => {
-                            if let indexed_db::Error::ReadOnly = e {
-                                // Expected error to abort the transaction after reads
-                            } else if let indexed_db::Error::DoesNotExist = e {
-                                // This can happen if the database has no object stores
-                            } else {
-                                return Err(indexed_db_error_to_io_error(e));
-                            }
-                        }
-                    }
-                }
-
-                Ok::<_, std::io::Error>(CommandResponse::TableNames(
-                    table_names_list_clone.take().into_iter().collect(),
-                ))
+        // Committed stores minus those cleared in this tx, plus any table a
+        // pending put has (re)created.
+        let mut names: HashSet<String> = self
+            .committed()
+            .table_names()
+            .await?
+            .into_iter()
+            .filter(|name| !self.overlay.cleared_tables.contains(name))
+            .collect();
+        for (table_name, writes) in &self.overlay.writes {
+            if writes.values().any(Option::is_some) {
+                names.insert(table_name.clone());
             }
-            .boxed_local()
-        };
-
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.command_request_sender
-            .unbounded_send((Box::new(table_names_closure), response_sender))
-            .map_err(|_| io::Error::other("Failed to send command request"))?;
-        let response = response_receiver
-            .await
-            .map_err(|_| io::Error::other("Failed to receive command response"))?;
-
-        if let CommandResponse::TableNames(table_names) = response {
-            return Ok(table_names);
         }
-        if let CommandResponse::Error(e) = response {
-            return Err(e);
-        }
-
-        Err(io::Error::other("Unexpected response type"))
+        Ok(names.into_iter().collect())
     }
 
     async fn keys_range(
@@ -634,87 +406,24 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         table_name: &str,
         range: crate::KeyRange,
     ) -> io::Result<Vec<String>> {
-        let table_name_owned = table_name.to_string();
-        let operations = self.operations.clone();
-        let mut table_names = HashSet::new();
-        for (op_table_name, _) in &operations {
-            table_names.insert(op_table_name.clone());
-        }
-        table_names.insert(table_name_owned.clone());
-
-        let keys_closure = move |db: Rc<RwLock<Database>>| {
-            async move {
-                let db = db.read().await;
-                let collected = Rc::new(RefCell::new(Vec::<String>::new()));
-                let collected_clone = Rc::clone(&collected);
-
-                // Replay pending operations inside an rw-tx so RYOW is
-                // honoured, run `getAllKeys` on the target store (no value
-                // blobs are read), then deliberately abort the tx so no
-                // changes leak.
-                match db
-                    .transaction(
-                        &table_names
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<&str>>(),
-                    )
-                    .rw()
-                    .run::<_, Infallible>(move |tx: Transaction<Infallible>| async move {
-                        let mut tables = HashMap::<String, Rc<ObjectStore<Infallible>>>::new();
-                        for (op_table_name, op) in operations {
-                            let table = if let Some(t) = tables.get(&op_table_name) {
-                                t.clone()
-                            } else {
-                                let t = Rc::new(tx.object_store(&op_table_name)?);
-                                tables.insert(op_table_name.clone(), Rc::clone(&t));
-                                t
-                            };
-                            op(table).await?;
-                        }
-                        let target = if let Some(t) = tables.get(&table_name_owned) {
-                            t.clone()
-                        } else {
-                            let t = Rc::new(tx.object_store(&table_name_owned)?);
-                            tables.insert(table_name_owned.clone(), Rc::clone(&t));
-                            t
-                        };
-                        for k in target.get_all_keys(None).await? {
-                            collected
-                                .borrow_mut()
-                                .push(k.as_string().unwrap_or_default());
-                        }
-                        Err::<(), indexed_db::Error<Infallible>>(indexed_db::Error::ReadOnly)
-                    })
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(indexed_db::Error::ReadOnly) => {} // expected abort
-                    Err(indexed_db::Error::DoesNotExist) => {
-                        // Target store absent → no keys.
-                        return Ok(CommandResponse::Keys(Vec::new()));
-                    }
-                    Err(e) => return Err(indexed_db_error_to_io_error(e)),
+        // Committed keys (skipped if cleared in this tx), with pending puts added
+        // and tombstones removed; the range/sort/limit is applied last.
+        let base = if self.overlay.cleared_tables.contains(table_name) {
+            Vec::new()
+        } else {
+            read_all_keys(&self.command_request_sender, table_name).await?
+        };
+        let mut keys: BTreeSet<String> = base.into_iter().collect();
+        if let Some(writes) = self.overlay.writes.get(table_name) {
+            for (key, value) in writes {
+                if value.is_some() {
+                    keys.insert(key.clone());
+                } else {
+                    keys.remove(key);
                 }
-
-                Ok::<_, io::Error>(CommandResponse::Keys(collected_clone.take()))
             }
-            .boxed_local()
-        };
-
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.command_request_sender
-            .unbounded_send((Box::new(keys_closure), response_sender))
-            .map_err(|_| io::Error::other("Failed to send command request"))?;
-        let response = response_receiver
-            .await
-            .map_err(|_| io::Error::other("Failed to receive command response"))?;
-        let keys = match response {
-            CommandResponse::Keys(keys) => keys,
-            CommandResponse::Error(e) => return Err(e),
-            _ => return Err(io::Error::other("Unexpected response type")),
-        };
-        Ok(keys_apply_range(keys, &range))
+        }
+        Ok(keys_apply_range(keys.into_iter().collect(), &range))
     }
 }
 
@@ -730,14 +439,15 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
         let old_value = self.get(table_name, key).await?;
 
         let table_name_clone = table_name.to_string();
-        let key = key.to_string();
-        let value = value.to_vec();
+        let key_clone = key.to_string();
+        let value_owned = value.to_vec();
+        let value_clone = value_owned.clone();
         let op = move |table: Rc<ObjectStore<Infallible>>| -> Pin<
             Box<dyn Future<Output = Result<Option<TableUpdate>, indexed_db::Error<Infallible>>>>,
         > {
             let table_name = table_name_clone.to_string();
-            let key = key.to_string();
-            let value = value.clone();
+            let key = key_clone.to_string();
+            let value = value_clone.clone();
             Box::pin(async move {
                 table
                     .put_kv(&JsValue::from(key), &Uint8Array::from(value.as_ref()))
@@ -748,6 +458,7 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
         };
 
         self.operations.push((table_name.to_string(), Arc::new(op)));
+        self.overlay.put(table_name, key, value_owned);
 
         Ok(old_value)
     }
@@ -755,12 +466,12 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
     async fn remove(&mut self, table_name: &str, key: &str) -> io::Result<Option<Vec<u8>>> {
         let old_value = self.get(table_name, key).await?;
 
-        let table_name = table_name.to_string();
-        let key = key.to_string();
+        let table_name_clone = table_name.to_string();
+        let key_clone = key.to_string();
         let op = move |table: Rc<ObjectStore<Infallible>>| -> Pin<
             Box<dyn Future<Output = Result<Option<TableUpdate>, indexed_db::Error<Infallible>>>>,
         > {
-            let key = key.to_string();
+            let key = key_clone.to_string();
             Box::pin(async move {
                 match table.delete(&JsValue::from(key)).await {
                     Ok(()) => {}
@@ -775,7 +486,8 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
             })
         };
 
-        self.operations.push((table_name, Arc::new(op)));
+        self.operations.push((table_name_clone, Arc::new(op)));
+        self.overlay.tombstone(table_name, key);
 
         Ok(old_value)
     }
@@ -796,6 +508,7 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
         };
 
         self.operations.push((table_name.to_string(), Arc::new(op)));
+        self.overlay.delete_table(table_name);
 
         Ok(())
     }
@@ -966,45 +679,10 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
                     key,
                     value,
                 } => {
-                    let table_name_clone = table_name.clone();
-                    let op = move |table: Rc<ObjectStore<Infallible>>| -> Pin<
-                        Box<
-                            dyn Future<
-                                Output = Result<Option<TableUpdate>, indexed_db::Error<Infallible>>,
-                            >,
-                        >,
-                    > {
-                        let table_name = table_name_clone.clone();
-                        let key = key.clone();
-                        let value = value.clone();
-                        Box::pin(async move {
-                            table
-                                .put_kv(&JsValue::from(key), &Uint8Array::from(value.as_ref()))
-                                .await?;
-                            Ok(Some(TableUpdate::Created(table_name)))
-                        })
-                    };
-                    self.operations.push((table_name, Arc::new(op)));
+                    self.insert(&table_name, &key, &value).await?;
                 }
                 WriteOp::Remove { table_name, key } => {
-                    let op = move |table: Rc<ObjectStore<Infallible>>| -> Pin<
-                        Box<
-                            dyn Future<
-                                Output = Result<Option<TableUpdate>, indexed_db::Error<Infallible>>,
-                            >,
-                        >,
-                    > {
-                        let key = key.clone();
-                        Box::pin(async move {
-                            match table.delete(&JsValue::from(key)).await {
-                                Ok(()) => {}
-                                Err(indexed_db::Error::DoesNotExist) => {}
-                                Err(e) => return Err(e),
-                            }
-                            Ok(None)
-                        })
-                    };
-                    self.operations.push((table_name, Arc::new(op)));
+                    self.remove(&table_name, &key).await?;
                 }
                 WriteOp::DeleteTable { table_name } => {
                     self.delete_table(&table_name).await?;
@@ -1036,6 +714,7 @@ impl AsyncTransactionalKVDB for IndexedDB {
             version: self.version.clone(),
             command_request_sender: self.command_request_sender.clone(),
             operations: Vec::new(),
+            overlay: WriteOverlay::default(),
         })
     }
 
