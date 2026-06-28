@@ -120,9 +120,15 @@ pub struct IndexedDB {
 
 impl Drop for IndexedDB {
     fn drop(&mut self) {
-        // Close the database connection
+        // Signal the actor to close the database connection gracefully.
+        // Dropping `task_handle` detaches the task (no `Drop`/abort on
+        // `JoinHandle`), so the actor runs to completion: it observes the
+        // dropper, closes the connection, and returns. Aborting here would
+        // race that graceful close and can cancel the task before it closes
+        // a manual-close connection, leaking it open and blocking later
+        // `delete_database`/version-change transactions on the same name.
         self.idb_dropper.take().map(|sender| sender.send(()).ok());
-        self.task_handle.abort();
+        let _ = &self.task_handle;
     }
 }
 
