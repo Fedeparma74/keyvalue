@@ -234,6 +234,13 @@ impl crate::AsyncKeyValueDB for InMemoryDB {
     ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         KeyValueDB::iter_from_prefix(self, table_name, prefix)
     }
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        KeyValueDB::iter_range(self, table_name, range)
+    }
     async fn contains_table(&self, table_name: &str) -> Result<bool, io::Error> {
         KeyValueDB::contains_table(self, table_name)
     }

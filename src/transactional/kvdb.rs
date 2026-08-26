@@ -1,4 +1,4 @@
-use crate::{Direction, KeyRange, MaybeSendSync, apply_range_in_memory, io};
+use crate::{Direction, KeyRange, MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
@@ -59,22 +59,22 @@ pub trait KVReadTransaction<'a>: MaybeSendSync {
 
     /// Transactional counterpart of [`crate::KeyValueDB::iter_range`].
     ///
-    /// See the non-transactional trait for semantics.  The default
-    /// implementation is an in-memory fallback; every shipped backend
-    /// overrides this with a native range-scan that honours the transaction
-    /// snapshot and any pending writes (read-your-own-writes).
+    /// See the non-transactional trait for semantics.  Implementations must
+    /// honour the transaction snapshot and any pending writes
+    /// (read-your-own-writes).
+    ///
+    /// Required, deliberately: every cursor-paginated read on this trait
+    /// funnels through here, so an implementation that does not scan the
+    /// range natively turns each of them into a full-table read whose cost
+    /// is set by the table, not by `range.limit`. There is no safe generic
+    /// fallback, so the compiler asks for this rather than letting it pass
+    /// silently.
     #[allow(clippy::type_complexity)]
     fn iter_range(
         &self,
         table_name: &str,
         range: KeyRange,
-    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let items = match &range.prefix {
-            Some(p) => self.iter_from_prefix(table_name, p.as_str())?,
-            None => self.iter(table_name)?,
-        };
-        Ok(apply_range_in_memory(items, &range))
-    }
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
 
     /// Cursor-based pagination over the full table.
     #[allow(clippy::type_complexity)]

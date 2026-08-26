@@ -205,6 +205,25 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
         Err(io::Error::other("Unexpected response type"))
     }
 
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> io::Result<Vec<(String, Vec<u8>)>> {
+        // IndexedDB is read through `getAll` over the actor protocol, which
+        // exposes no server-side range scan, so the store is fetched and the
+        // range applied client-side.  Spelled out here rather than inherited
+        // from a trait default so the cost is visible at the implementation
+        // that pays it; `keys_range` below fetches keys only and is cheaper
+        // whenever values are not needed.
+        let items = match &range.prefix {
+            Some(p) => self.iter_from_prefix(table_name, p.as_str()).await?,
+            None => self.iter(table_name).await?,
+        };
+        Ok(crate::apply_range_in_memory(items, &range))
+    }
+
+
     async fn keys_range(
         &self,
         table_name: &str,
@@ -628,6 +647,25 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
 
         Err(io::Error::other("Unexpected response type"))
     }
+
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> io::Result<Vec<(String, Vec<u8>)>> {
+        // IndexedDB is read through `getAll` over the actor protocol, which
+        // exposes no server-side range scan, so the store is fetched and the
+        // range applied client-side.  Spelled out here rather than inherited
+        // from a trait default so the cost is visible at the implementation
+        // that pays it; `keys_range` below fetches keys only and is cheaper
+        // whenever values are not needed.
+        let items = match &range.prefix {
+            Some(p) => self.iter_from_prefix(table_name, p.as_str()).await?,
+            None => self.iter(table_name).await?,
+        };
+        Ok(crate::apply_range_in_memory(items, &range))
+    }
+
 
     async fn keys_range(
         &self,

@@ -1,4 +1,4 @@
-use crate::{Direction, KeyRange, MaybeSendSync, apply_range_in_memory, io};
+use crate::{Direction, KeyRange, MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -45,20 +45,15 @@ pub trait AsyncKeyValueDB: MaybeSendSync + 'static {
 
     /// Async counterpart of [`crate::KeyValueDB::iter_range`].
     ///
-    /// See the sync trait for semantics.  The default in-memory fallback
-    /// loads the full table or prefix and is O(N); every shipped backend
-    /// overrides this with a native range-scan.
+    /// See the sync trait for semantics.  Required, deliberately: this is
+    /// what every cursor-paginated read funnels through, and the in-memory
+    /// fallback it used to carry made a `limit = 1` read cost a full-table
+    /// load for any implementation that did not override it.
     async fn iter_range(
         &self,
         table_name: &str,
         range: KeyRange,
-    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let items = match &range.prefix {
-            Some(p) => self.iter_from_prefix(table_name, p.as_str()).await?,
-            None => self.iter(table_name).await?,
-        };
-        Ok(apply_range_in_memory(items, &range))
-    }
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
 
     /// Cursor-based pagination over the full table.
     async fn iter_paginated(

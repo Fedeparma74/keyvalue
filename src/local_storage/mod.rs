@@ -124,6 +124,22 @@ impl KeyValueDB for LocalStorageDB {
         }
     }
 
+    fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> io::Result<Vec<(String, Vec<u8>)>> {
+        // This backend exposes no ranged read, so the store is enumerated and
+        // the range applied afterwards. Written out here rather than inherited
+        // from a trait default, so the cost is visible at the implementation
+        // that pays it.
+        let items = match &range.prefix {
+            Some(p) => KeyValueDB::iter_from_prefix(self, table_name, p.as_str())?,
+            None => KeyValueDB::iter(self, table_name)?,
+        };
+        Ok(crate::apply_range_in_memory(items, &range))
+    }
+
     fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
         validate_name("table name", table_name)?;
         let prefix = format!("{}/{}/", self.name, table_name);
@@ -282,6 +298,13 @@ impl crate::AsyncKeyValueDB for LocalStorageDB {
     }
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         KeyValueDB::iter(self, table_name)
+    }
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        KeyValueDB::iter_range(self, table_name, range)
     }
     async fn table_names(&self) -> Result<Vec<String>, io::Error> {
         KeyValueDB::table_names(self)

@@ -470,6 +470,24 @@ impl AsyncKeyValueDB for IndexedDB {
         }
     }
 
+    async fn iter_range(
+        &self,
+        table_name: &str,
+        range: crate::KeyRange,
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
+        // IndexedDB is read here through `getAll`, which has no ranged form in
+        // this actor protocol, so the store is fetched and the range applied
+        // afterwards. Written out rather than inherited from a trait default,
+        // so the cost is visible at the implementation that pays it.
+        let items = match &range.prefix {
+            Some(p) => {
+                AsyncKeyValueDB::iter_from_prefix(self, table_name, p.as_str()).await?
+            }
+            None => AsyncKeyValueDB::iter(self, table_name).await?,
+        };
+        Ok(crate::apply_range_in_memory(items, &range))
+    }
+
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         let table_name = table_name.to_string();
         let iter_closure = move |db: Rc<RwLock<Database>>| {

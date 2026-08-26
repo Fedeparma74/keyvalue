@@ -1,4 +1,4 @@
-use crate::{Direction, KeyRange, MaybeSendSync, apply_range_in_memory, io};
+use crate::{Direction, KeyRange, MaybeSendSync, io};
 #[cfg(not(feature = "std"))]
 use alloc::{
     string::{String, ToString},
@@ -84,28 +84,23 @@ pub trait KeyValueDB: MaybeSendSync + 'static {
     /// [`values_paginated`](Self::values_paginated)) is a thin wrapper around
     /// it.
     ///
-    /// ## Default implementation
+    /// ## Required
     ///
-    /// The default implementation is an **in-memory fallback** that loads the
-    /// whole table (or prefix) via [`iter`](Self::iter) /
-    /// [`iter_from_prefix`](Self::iter_from_prefix), filters, sorts and
-    /// truncates.  It is O(N) in memory and CPU regardless of the requested
-    /// page size and **must not** be used in production hot paths.
-    ///
-    /// Every shipped backend overrides this with a native range-scan that is
-    /// O(limit).
+    /// Every cursor-paginated read on this trait funnels through here, so an
+    /// implementation that cannot scan the range natively must say so
+    /// explicitly. This used to carry an in-memory fallback that loaded the
+    /// whole table via [`iter`](Self::iter) and filtered afterwards, which is
+    /// O(table) in memory and CPU whatever the page size; a wrapper that
+    /// forwarded only `get`/`iter` inherited it silently and turned every
+    /// `limit = 1` read into a full-table load. Backends that genuinely have
+    /// no ranged read still do that, but they now write it out themselves so
+    /// the cost is visible where it is paid.
     #[allow(clippy::type_complexity)]
     fn iter_range(
         &self,
         table_name: &str,
         range: KeyRange,
-    ) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
-        let items = match &range.prefix {
-            Some(p) => self.iter_from_prefix(table_name, p.as_str())?,
-            None => self.iter(table_name)?,
-        };
-        Ok(apply_range_in_memory(items, &range))
-    }
+    ) -> Result<Vec<(String, Vec<u8>)>, io::Error>;
 
     /// Cursor-based pagination over the full table.
     ///
