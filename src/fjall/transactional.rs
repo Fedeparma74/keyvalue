@@ -19,7 +19,7 @@ fn lock_poisoned() -> io::Error {
 /// excluded from all reads.
 pub struct ReadTransaction {
     snapshot: Snapshot,
-    db: SingleWriterTxDatabase,
+    db: Arc<SingleWriterTxDatabase>,
     /// Snapshot of deleted tables taken at begin_read() time for isolation.
     deleted_tables: HashSet<String>,
     max_memtable_size: u64,
@@ -32,7 +32,7 @@ pub struct ReadTransaction {
 /// A `snapshot` is kept for read-your-own-write (RYOW) semantics:
 /// reads first check the pending buffer, then fall through to the snapshot.
 pub struct WriteTransaction {
-    db: SingleWriterTxDatabase,
+    db: Arc<SingleWriterTxDatabase>,
     snapshot: Snapshot,
     pending: HashMap<String, HashMap<String, Option<Vec<u8>>>>, // For RYOW
     tx_deleted_tables: HashSet<String>,                         // Local to this transaction
@@ -877,7 +877,7 @@ impl TransactionalKVDB for FjallDB {
             .clone();
         Ok(ReadTransaction {
             snapshot: inner.read_tx(),
-            db: inner.clone(),
+            db: inner.handle(),
             deleted_tables: deleted_snapshot,
             max_memtable_size: self.max_memtable_size,
         })
@@ -886,7 +886,7 @@ impl TransactionalKVDB for FjallDB {
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
         let inner = self.inner()?;
         Ok(WriteTransaction {
-            db: inner.clone(),
+            db: inner.handle(),
             snapshot: inner.read_tx(),
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
@@ -950,5 +950,36 @@ mod async_impl {
                 .await
                 .map_err(std::io::Error::other)?
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    /// Recovery must never trade a working database for a permanently absent
+    /// one: while a transaction is live the re-open cannot succeed (fjall's
+    /// directory lock is still held by that transaction's handle), so the
+    /// attempt has to be refused with the store left intact.
+    #[test]
+    fn recovery_refuses_while_a_transaction_still_holds_the_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = FjallDB::open(dir.path()).expect("open");
+
+        let tx = TransactionalKVDB::begin_read(&db).expect("begin_read");
+
+        let err = db
+            .try_recover_from_poison()
+            .expect_err("recovery must refuse while a transaction is live");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // The refusal is non-destructive: the store still serves traffic.
+        drop(tx);
+        TransactionalKVDB::begin_read(&db).expect("database still usable after a refused recovery");
+
+        // And once the transaction has drained, recovery goes through.
+        db.try_recover_from_poison()
+            .expect("recovery succeeds once no transaction holds the database");
+        TransactionalKVDB::begin_read(&db).expect("database usable after recovery");
     }
 }

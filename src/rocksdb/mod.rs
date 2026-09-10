@@ -717,14 +717,19 @@ impl RocksDB {
     /// mark itself as degraded and refuse further writes.  This method:
     ///
     /// 1. Acquires exclusive write access (no readers or writers in flight).
-    /// 2. Drops the old (possibly broken) `Arc<Rocks>` instance; once the
-    ///    last Arc clone is gone, the LOCK file is released.
-    /// 3. Re-opens the database from the same path and options.
+    /// 2. Refuses, without touching the store, while any other `Arc<Rocks>`
+    ///    clone is out — the LOCK file goes with the last one, so the
+    ///    re-open could not succeed.
+    /// 3. Drops the old (possibly broken) `Arc<Rocks>` instance, releasing
+    ///    the LOCK file.
+    /// 4. Re-opens the database from the same path and options.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be re-opened (e.g. the
-    /// underlying hardware issue has not been resolved yet).
+    /// [`io::ErrorKind::WouldBlock`] when handles are still out; the store is
+    /// untouched and the caller may try again once they drain. Any other
+    /// error means the re-open itself failed (e.g. the underlying hardware
+    /// issue has not been resolved yet).
     pub fn try_recover_from_error(&self) -> io::Result<()> {
         // Acquire write lock; also recover from any RwLock poison caused by
         // a panicking thread that held the lock.
@@ -733,14 +738,32 @@ impl RocksDB {
             Err(e) => e.into_inner(),
         };
 
-        // Step 1: drop the old (possibly broken) Arc<Rocks>.
+        // Step 1: refuse while another clone is still out. The LOCK file goes
+        // only with the last one, so re-opening the path would fail — and the
+        // dropped handle cannot be rebuilt without that same open, leaving the
+        // database absent for the rest of the process's life. The write lock
+        // above stops new clones being handed out while this runs.
+        if let Some(db) = inner_guard.as_ref() {
+            let outstanding = Arc::strong_count(db) - 1;
+            if outstanding > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "cannot re-open RocksDB while {outstanding} handle(s) are still out; \
+                         retry once they drain"
+                    ),
+                ));
+            }
+        }
+
+        // Step 2: drop the old (possibly broken) Arc<Rocks>.
         // The LOCK file is released once all Arc clones are gone.
         *inner_guard = None;
 
-        // Step 2: re-open the database.
+        // Step 3: re-open the database.
         let new_db = Self::build_database(&self.path, &self.opts)?;
 
-        // Step 3: install the new instance.
+        // Step 4: install the new instance.
         *inner_guard = Some(Arc::new(new_db));
 
         Ok(())

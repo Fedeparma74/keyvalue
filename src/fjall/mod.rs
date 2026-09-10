@@ -228,7 +228,7 @@ impl FjallConfig {
 /// into a deleted keyspace transparently un-deletes it.
 #[derive(Clone)]
 pub struct FjallDB {
-    inner: Arc<RwLock<Option<SingleWriterTxDatabase>>>,
+    inner: Arc<RwLock<Option<Arc<SingleWriterTxDatabase>>>>,
     path: Arc<PathBuf>,
     config: Arc<FjallConfig>,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
@@ -240,7 +240,25 @@ pub struct FjallDB {
 /// Derefs to `SingleWriterTxDatabase` so all call-sites remain unchanged.
 /// Constructed only via [`FjallDB::inner`], which ensures the `Option` is
 /// `Some` before handing out the guard.
-pub(super) struct FjallDBGuard<'a>(std::sync::RwLockReadGuard<'a, Option<SingleWriterTxDatabase>>);
+pub(super) struct FjallDBGuard<'a>(
+    std::sync::RwLockReadGuard<'a, Option<Arc<SingleWriterTxDatabase>>>,
+);
+
+impl FjallDBGuard<'_> {
+    /// Clones the shared handle out of the guard.
+    ///
+    /// Every clone keeps fjall's directory lock held, so a transaction that
+    /// holds one blocks [`FjallDB::try_recover_from_poison`] from re-opening
+    /// the path. That is why recovery counts the outstanding clones instead
+    /// of assuming the store is free.
+    pub(super) fn handle(&self) -> Arc<SingleWriterTxDatabase> {
+        Arc::clone(
+            self.0
+                .as_ref()
+                .expect("FjallDB inner is None during recovery"),
+        )
+    }
+}
 
 impl<'a> std::ops::Deref for FjallDBGuard<'a> {
     type Target = SingleWriterTxDatabase;
@@ -262,7 +280,7 @@ impl FjallDB {
     /// Opens (or creates) a fjall database at `path` with custom
     /// [`FjallConfig`].
     pub fn open_with_config(path: &Path, config: FjallConfig) -> io::Result<Self> {
-        let inner = Self::build_database(path, &config)?;
+        let inner = Arc::new(Self::build_database(path, &config)?);
         let deleted = Arc::new(RwLock::new(HashSet::new()));
 
         // Load persisted deleted tables
@@ -340,17 +358,26 @@ impl FjallDB {
     ///
     /// When fjall encounters a hardware-level I/O failure (e.g. disk full)
     /// during a flush or commit, it marks the database instance as *poisoned*
-    /// and refuses all future writes.  This method:
+    /// and refuses all future writes.  Re-opening the path is the only way
+    /// back, and re-opening requires this process to be holding no other
+    /// handle: fjall guards the directory with an advisory file lock owned by
+    /// an `Arc`, so the lock is released only when the LAST handle drops, and
+    /// a second `open()` against a path this process still holds fails with
+    /// `Error::Locked`.
     ///
-    /// 1. Acquires exclusive write access (no readers or writers in flight).
-    /// 2. Drops the old (poisoned) database instance, releasing the file lock.
-    /// 3. Re-opens the database from the same path and config.
-    /// 4. Reloads the in-memory deleted-table metadata from disk.
+    /// Every live transaction owns a handle clone, so recovery is only
+    /// possible while none is outstanding.  This method therefore checks
+    /// first and **refuses without touching the store** when it cannot
+    /// succeed — dropping the handle to find out would leave the database
+    /// absent for the rest of the process's life, since the dropped handle
+    /// cannot be rebuilt without the very `open()` that is failing.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be re-opened (e.g. the
-    /// underlying hardware issue has not been resolved yet).
+    /// [`io::ErrorKind::WouldBlock`] when transactions are still live: the
+    /// store is untouched and the caller may try again once they drain.
+    /// Any other error means the re-open itself failed (e.g. the underlying
+    /// hardware issue has not been resolved yet).
     pub fn try_recover_from_poison(&self) -> io::Result<()> {
         // Acquire write lock; also recover from any RwLock poison caused by
         // a panicking thread that held the lock.
@@ -363,19 +390,35 @@ impl FjallDB {
             Err(e) => e.into_inner(),
         };
 
-        // Step 1: drop the old (possibly poisoned) instance so fjall releases
+        // Step 1: refuse while any transaction still holds a handle clone.
+        // The write lock above stops new ones being handed out, so this count
+        // cannot grow while the check and the teardown run.
+        if let Some(db) = inner_guard.as_ref() {
+            let outstanding = Arc::strong_count(db) - 1;
+            if outstanding > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "cannot re-open the fjall database while {outstanding} transaction(s) \
+                         still hold it; retry once they drain"
+                    ),
+                ));
+            }
+        }
+
+        // Step 2: drop the old (possibly poisoned) instance so fjall releases
         // its exclusive file lock on the database directory.
         *inner_guard = None;
 
-        // Step 2: re-open the database.  This will fail if the underlying
+        // Step 3: re-open the database.  This will fail if the underlying
         // issue (e.g. disk full) has not been resolved.
-        let new_db = Self::build_database(&self.path, &self.config)?;
+        let new_db = Arc::new(Self::build_database(&self.path, &self.config)?);
 
-        // Step 3: reload deleted-table metadata from the fresh database.
+        // Step 4: reload deleted-table metadata from the fresh database.
         deleted_guard.clear();
         Self::load_deleted_tables_into(&new_db, &mut deleted_guard)?;
 
-        // Step 4: install the new database.
+        // Step 5: install the new database.
         *inner_guard = Some(new_db);
 
         Ok(())
