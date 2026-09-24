@@ -30,6 +30,12 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+#[cfg(feature = "stats")]
+mod stats;
+
+#[cfg(feature = "stats")]
+pub use self::stats::{FjallStats, KeyspaceStats};
+
 #[cfg(feature = "tokio")]
 crate::impl_async_kvdb_via_spawn_blocking!(FjallDB);
 
@@ -233,6 +239,9 @@ pub struct FjallDB {
     config: Arc<FjallConfig>,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
     max_memtable_size: u64,
+    /// The live transactions, reported by [`FjallDB::stats`].
+    #[cfg(all(feature = "stats", feature = "transactional"))]
+    transactions: stats::TransactionRegistry,
 }
 
 /// RAII guard returned by [`FjallDB::inner`].
@@ -292,6 +301,8 @@ impl FjallDB {
             config: Arc::new(config.clone()),
             deleted_tables: deleted,
             max_memtable_size: config.max_memtable_size,
+            #[cfg(all(feature = "stats", feature = "transactional"))]
+            transactions: stats::TransactionRegistry::default(),
         })
     }
 
@@ -422,6 +433,16 @@ impl FjallDB {
         *inner_guard = Some(new_db);
 
         Ok(())
+    }
+
+    /// Collects runtime statistics of the database and each of its keyspaces.
+    ///
+    /// Purely observational: it opens no snapshot or transaction, creates no
+    /// keyspace and triggers no flush, compaction or garbage collection, so
+    /// reading the figures does not move them.
+    #[cfg(feature = "stats")]
+    pub fn stats(&self) -> io::Result<FjallStats> {
+        stats::collect(self)
     }
 
     /// Acquires a read lock on the inner database.

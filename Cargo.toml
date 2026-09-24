@@ -62,6 +62,9 @@ async = ["async-trait", "dep:futures"]
 tokio = ["async", "dep:tokio", "tokio/rt-multi-thread"]
 transactional = []
 versioned = []
+# `FjallDB::stats`. Takes effect only together with `fjall`, which it does
+# not enable, so it can be switched on for targets that have no fjall.
+stats = []
 
 in-memory = ["std"]
 redb = ["std", "dep:redb"]
@@ -99,6 +102,7 @@ test = [
     "tokio",
     "transactional",
     "versioned",
+    "stats",
     "in-memory",
     "redb",
     "fjall",

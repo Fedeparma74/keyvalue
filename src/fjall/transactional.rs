@@ -23,6 +23,10 @@ pub struct ReadTransaction {
     /// Snapshot of deleted tables taken at begin_read() time for isolation.
     deleted_tables: HashSet<String>,
     max_memtable_size: u64,
+    /// Keeps this transaction counted in [`FjallDB::stats`] while it lives.
+    /// Declared last, so it is dropped after the snapshot.
+    #[cfg(feature = "stats")]
+    _ticket: super::stats::TransactionTicket,
 }
 
 /// Read-write transaction for Fjall.
@@ -43,6 +47,10 @@ pub struct WriteTransaction {
     tx_recreated_tables: HashSet<String>,
     global_deleted_tables: Arc<RwLock<HashSet<String>>>, // Shared global state
     max_memtable_size: u64,
+    /// Keeps this transaction counted in [`FjallDB::stats`] while it lives.
+    /// Declared last, so it is dropped after the snapshot.
+    #[cfg(feature = "stats")]
+    _ticket: super::stats::TransactionTicket,
 }
 
 impl ReadTransaction {
@@ -875,24 +883,35 @@ impl TransactionalKVDB for FjallDB {
             .read()
             .map_err(|_| lock_poisoned())?
             .clone();
+        let snapshot = inner.read_tx();
+        #[cfg(feature = "stats")]
+        let ticket = self.transactions.register(snapshot.seqno());
         Ok(ReadTransaction {
-            snapshot: inner.read_tx(),
+            snapshot,
             db: inner.handle(),
             deleted_tables: deleted_snapshot,
             max_memtable_size: self.max_memtable_size,
+            #[cfg(feature = "stats")]
+            _ticket: ticket,
         })
     }
 
     fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
         let inner = self.inner()?;
+        let db = inner.handle();
+        let snapshot = inner.read_tx();
+        #[cfg(feature = "stats")]
+        let ticket = self.transactions.register(snapshot.seqno());
         Ok(WriteTransaction {
-            db: inner.handle(),
-            snapshot: inner.read_tx(),
+            db,
+            snapshot,
             pending: HashMap::new(),
             tx_deleted_tables: HashSet::new(),
             tx_recreated_tables: HashSet::new(),
             global_deleted_tables: self.deleted_tables.clone(),
             max_memtable_size: self.max_memtable_size,
+            #[cfg(feature = "stats")]
+            _ticket: ticket,
         })
     }
 

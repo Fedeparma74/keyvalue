@@ -28,6 +28,8 @@
 //! - **`tokio`** — Enables `spawn_blocking`-based async wrappers for synchronous backends.
 //! - **`transactional`** — Enables the transactional API traits.
 //! - **`versioned`** — Enables the versioned API traits.
+//! - **`stats`** — Enables `fjall::FjallDB::stats`, runtime statistics of the fjall backend
+//!   (only together with `fjall`).
 //!
 //! ## Quick start
 //!
