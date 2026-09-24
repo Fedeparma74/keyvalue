@@ -480,9 +480,7 @@ impl AsyncKeyValueDB for IndexedDB {
         // afterwards. Written out rather than inherited from a trait default,
         // so the cost is visible at the implementation that pays it.
         let items = match &range.prefix {
-            Some(p) => {
-                AsyncKeyValueDB::iter_from_prefix(self, table_name, p.as_str()).await?
-            }
+            Some(p) => AsyncKeyValueDB::iter_from_prefix(self, table_name, p.as_str()).await?,
             None => AsyncKeyValueDB::iter(self, table_name).await?,
         };
         Ok(crate::apply_range_in_memory(items, &range))

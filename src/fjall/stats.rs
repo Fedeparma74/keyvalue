@@ -131,6 +131,18 @@ static CAPTURE_BACKTRACES: LazyLock<bool> = LazyLock::new(|| {
     std::env::var_os("KEYVALUE_FJALL_TX_BACKTRACE").is_some_and(|value| value == "1")
 });
 
+/// Where a transaction was opened, when [`CAPTURE_BACKTRACES`] is set.
+#[cfg(feature = "transactional")]
+pub(super) type Origin = Option<Arc<Backtrace>>;
+
+/// The backtrace of the caller opening a transaction, when
+/// [`CAPTURE_BACKTRACES`] is set. Taken on the caller's own thread, before
+/// any hand-off to a blocking thread, so it names the code that opened it.
+#[cfg(feature = "transactional")]
+pub(super) fn capture_origin() -> Origin {
+    CAPTURE_BACKTRACES.then(|| Arc::new(Backtrace::force_capture()))
+}
+
 /// The live transactions of one [`FjallDB`], keyed by the sequence number
 /// their snapshot reads at, then by the order they were registered in.
 #[cfg(feature = "transactional")]
@@ -154,14 +166,14 @@ struct OldestTransaction {
 
 #[cfg(feature = "transactional")]
 impl TransactionRegistry {
-    /// Registers a transaction whose snapshot reads at `seqno`. It stays
-    /// registered until the returned ticket is dropped.
-    pub(super) fn register(&self, seqno: u64) -> TransactionTicket {
+    /// Registers a transaction whose snapshot reads at `seqno`, opened from
+    /// `origin`. It stays registered until the returned ticket is dropped.
+    pub(super) fn register(&self, seqno: u64, origin: Origin) -> TransactionTicket {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let key = (seqno, NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let transaction = OpenTransaction {
             opened_at: Instant::now(),
-            backtrace: CAPTURE_BACKTRACES.then(|| Arc::new(Backtrace::force_capture())),
+            backtrace: origin,
         };
         self.0
             .lock()
@@ -435,6 +447,40 @@ mod tests {
         assert_eq!(stats.oldest_transaction_seqno, None);
         assert_eq!(stats.oldest_transaction_age, None);
         assert_eq!(stats.oldest_transaction_backtrace, None);
+    }
+
+    /// Opens a read transaction through the asynchronous API, from a caller
+    /// the captured backtrace can name.
+    #[cfg(all(feature = "transactional", feature = "async", feature = "tokio"))]
+    #[inline(never)]
+    async fn open_from_an_async_caller(
+        db: &FjallDB,
+    ) -> <FjallDB as crate::AsyncTransactionalKVDB>::ReadTransaction<'_> {
+        crate::AsyncTransactionalKVDB::begin_read(db)
+            .await
+            .expect("begin_read")
+    }
+
+    #[cfg(all(feature = "transactional", feature = "async", feature = "tokio"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transaction_opened_asynchronously_is_traced_to_its_caller() {
+        let (_dir, db) = open_temporary();
+        db.insert("table", "key", b"value").expect("insert");
+
+        let read = open_from_an_async_caller(&db).await;
+
+        let stats = db.stats().expect("stats");
+        assert_eq!(
+            stats.oldest_transaction_backtrace.is_some(),
+            *CAPTURE_BACKTRACES
+        );
+        if let Some(backtrace) = &stats.oldest_transaction_backtrace {
+            assert!(
+                backtrace.contains("open_from_an_async_caller"),
+                "{backtrace}"
+            );
+        }
+        drop(read);
     }
 
     #[test]

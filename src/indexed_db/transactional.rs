@@ -223,7 +223,6 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
         Ok(crate::apply_range_in_memory(items, &range))
     }
 
-
     async fn keys_range(
         &self,
         table_name: &str,
@@ -665,7 +664,6 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         };
         Ok(crate::apply_range_in_memory(items, &range))
     }
-
 
     async fn keys_range(
         &self,

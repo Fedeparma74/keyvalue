@@ -870,11 +870,29 @@ impl<'a> KVWriteTransaction<'a> for WriteTransaction {
     }
 }
 
-impl TransactionalKVDB for FjallDB {
-    type ReadTransaction<'a> = ReadTransaction;
-    type WriteTransaction<'a> = WriteTransaction;
+/// Where a transaction is being opened, as [`FjallDB::stats`] reports it.
+#[cfg(feature = "stats")]
+type Origin = super::stats::Origin;
+/// Where a transaction is being opened: nothing is recorded without `stats`.
+#[cfg(not(feature = "stats"))]
+#[derive(Clone, Copy)]
+struct Origin;
 
-    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+/// The origin of a transaction the caller is opening now.
+#[cfg(feature = "stats")]
+fn capture_origin() -> Origin {
+    super::stats::capture_origin()
+}
+/// The origin of a transaction the caller is opening now.
+#[cfg(not(feature = "stats"))]
+fn capture_origin() -> Origin {
+    Origin
+}
+
+impl FjallDB {
+    /// [`TransactionalKVDB::begin_read`], opened from `origin`.
+    #[cfg_attr(not(feature = "stats"), allow(unused_variables))]
+    fn begin_read_from(&self, origin: Origin) -> Result<ReadTransaction, io::Error> {
         let inner = self.inner()?;
         // Clone the deleted_tables set to provide snapshot isolation.
         // This ensures concurrent writes don't affect this read transaction.
@@ -885,7 +903,7 @@ impl TransactionalKVDB for FjallDB {
             .clone();
         let snapshot = inner.read_tx();
         #[cfg(feature = "stats")]
-        let ticket = self.transactions.register(snapshot.seqno());
+        let ticket = self.transactions.register(snapshot.seqno(), origin);
         Ok(ReadTransaction {
             snapshot,
             db: inner.handle(),
@@ -896,12 +914,14 @@ impl TransactionalKVDB for FjallDB {
         })
     }
 
-    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+    /// [`TransactionalKVDB::begin_write`], opened from `origin`.
+    #[cfg_attr(not(feature = "stats"), allow(unused_variables))]
+    fn begin_write_from(&self, origin: Origin) -> Result<WriteTransaction, io::Error> {
         let inner = self.inner()?;
         let db = inner.handle();
         let snapshot = inner.read_tx();
         #[cfg(feature = "stats")]
-        let ticket = self.transactions.register(snapshot.seqno());
+        let ticket = self.transactions.register(snapshot.seqno(), origin);
         Ok(WriteTransaction {
             db,
             snapshot,
@@ -913,6 +933,19 @@ impl TransactionalKVDB for FjallDB {
             #[cfg(feature = "stats")]
             _ticket: ticket,
         })
+    }
+}
+
+impl TransactionalKVDB for FjallDB {
+    type ReadTransaction<'a> = ReadTransaction;
+    type WriteTransaction<'a> = WriteTransaction;
+
+    fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, io::Error> {
+        self.begin_read_from(capture_origin())
+    }
+
+    fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, io::Error> {
+        self.begin_write_from(capture_origin())
     }
 
     fn try_recover(&self) -> Result<(), io::Error> {
@@ -941,8 +974,9 @@ mod async_impl {
 
         async fn begin_read(&self) -> Result<Self::ReadTransaction<'_>, std::io::Error> {
             let db = self.clone();
+            let origin = super::capture_origin();
             tokio::task::spawn_blocking(move || {
-                let tx = crate::TransactionalKVDB::begin_read(&db)?;
+                let tx = db.begin_read_from(origin)?;
                 Ok(SpawnBlockingReadTx {
                     inner: Arc::new(Mutex::new(Some(tx))),
                 })
@@ -953,8 +987,9 @@ mod async_impl {
 
         async fn begin_write(&self) -> Result<Self::WriteTransaction<'_>, std::io::Error> {
             let db = self.clone();
+            let origin = super::capture_origin();
             tokio::task::spawn_blocking(move || {
-                let tx = crate::TransactionalKVDB::begin_write(&db)?;
+                let tx = db.begin_write_from(origin)?;
                 Ok(SpawnBlockingWriteTx {
                     inner: Arc::new(Mutex::new(Some(tx))),
                 })
