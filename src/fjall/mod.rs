@@ -913,4 +913,100 @@ impl KeyValueDB for FjallDB {
         }
         Ok(())
     }
+
+    /// Seals every keyspace's active memtable, waits until fjall has written
+    /// every sealed memtable to disk, then seals the journal and syncs it.
+    /// Recovery replays the active journal in full but skips the entries of a
+    /// sealed journal that each keyspace has persisted, so a reopen loads
+    /// nothing back into memory.
+    ///
+    /// fjall reports no completion of a flush, so this checks the sealed
+    /// memtable counts every 10 ms, as fjall's own `rotate_memtable_and_wait`
+    /// does. A flush that fails poisons the database and never completes, so
+    /// the wait returns an error once the database is poisoned.
+    fn flush(&self) -> Result<(), io::Error> {
+        let inner = self.inner()?;
+        let mut keyspaces = Vec::new();
+        for name in inner.list_keyspace_names() {
+            let keyspace = inner
+                .keyspace(name.as_ref(), || self.ks_options())
+                .map_err(io::Error::other)?;
+            keyspace
+                .inner()
+                .rotate_memtable()
+                .map_err(io::Error::other)?;
+            keyspaces.push(keyspace);
+        }
+        while keyspaces
+            .iter()
+            .any(|keyspace| keyspace.inner().sealed_memtable_count() > 0)
+        {
+            if inner.inner().is_poisoned() {
+                return Err(io::Error::other(fjall::Error::Poisoned));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        inner.inner().seal_journal().map_err(io::Error::other)?;
+        inner
+            .persist(fjall::PersistMode::SyncAll)
+            .map_err(io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    const TABLES: [&str; 3] = ["alpha", "beta", "gamma"];
+    const ROWS: usize = 200;
+
+    fn write_rows(db: &FjallDB) {
+        for table in TABLES {
+            for i in 0..ROWS {
+                db.insert(table, &format!("key-{i:04}"), &[7u8; 64])
+                    .expect("insert");
+            }
+        }
+    }
+
+    /// Bytes a fresh open of `path` holds in memtables before any write:
+    /// what recovery loaded back from the journal.
+    fn replayed_bytes(path: &Path) -> u64 {
+        let db = FjallDB::open(path).expect("reopen");
+        db.inner().expect("inner").write_buffer_size()
+    }
+
+    #[test]
+    fn a_reopen_without_flush_replays_the_journal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let db = FjallDB::open(dir.path()).expect("open");
+            write_rows(&db);
+        }
+        assert!(replayed_bytes(dir.path()) > 0);
+    }
+
+    #[test]
+    fn a_reopen_after_flush_replays_nothing_and_keeps_every_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let db = FjallDB::open(dir.path()).expect("open");
+            write_rows(&db);
+            KeyValueDB::flush(&db).expect("flush");
+        }
+        assert_eq!(replayed_bytes(dir.path()), 0);
+
+        let db = FjallDB::open(dir.path()).expect("reopen");
+        for table in TABLES {
+            assert_eq!(db.keys(table).expect("keys").len(), ROWS);
+        }
+    }
+
+    #[test]
+    fn flushing_an_empty_database_succeeds_and_repeats() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = FjallDB::open(dir.path()).expect("open");
+        KeyValueDB::flush(&db).expect("flush");
+        KeyValueDB::flush(&db).expect("second flush");
+    }
 }

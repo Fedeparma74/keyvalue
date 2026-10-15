@@ -218,6 +218,15 @@ pub trait KeyValueDB: MaybeSendSync + 'static {
         }
         Ok(())
     }
+    /// Moves everything the backend holds only in memory, and in a log it
+    /// would replay on reopen, into its durable on-disk structures, so that
+    /// reopening loads nothing back into memory.
+    ///
+    /// Call it once writes have stopped, before closing the database. The
+    /// default does nothing, for backends that keep nothing to replay.
+    fn flush(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

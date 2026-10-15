@@ -1309,6 +1309,20 @@ impl KeyValueDB for RocksDB {
 
         Ok(())
     }
+
+    /// Writes every column family's memtables to SST files and syncs the
+    /// write-ahead log, so a reopen replays nothing.
+    fn flush(&self) -> Result<(), io::Error> {
+        let inner = self.inner()?;
+        let db = &*inner;
+
+        for name in Rocks::list_cf(&self.opts, &self.path).map_err(io::Error::other)? {
+            if let Some(cf) = db.cf_handle(&name) {
+                db.flush_cf(&cf).map_err(io::Error::other)?;
+            }
+        }
+        db.flush_wal(true).map_err(io::Error::other)
+    }
 }
 
 /// Shared helper: apply a [`crate::KeyRange`] over a RocksDB column family

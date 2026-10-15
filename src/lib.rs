@@ -227,6 +227,13 @@ macro_rules! impl_async_kvdb_via_spawn_blocking {
                     .await
                     .map_err(std::io::Error::other)?
             }
+
+            async fn flush(&self) -> Result<(), std::io::Error> {
+                let db = self.clone();
+                tokio::task::spawn_blocking(move || $crate::KeyValueDB::flush(&db))
+                    .await
+                    .map_err(std::io::Error::other)?
+            }
         }
     };
 }
