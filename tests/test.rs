@@ -1170,6 +1170,7 @@ mod tests {
         .await
         .unwrap();
         common::test_async_db(&db).await;
+        common::test_async_compact(&db).await;
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::aws_s3::AwsS3DB::open(&endpoint_url, &region, credentials, bucket_name)
             .await
@@ -1447,6 +1448,224 @@ mod tests {
         let path = temp_dir.path().join("tr_sqlite");
         let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
         common::test_async_try_recover(&db).await;
+    }
+
+    // =======================================================================
+    // compact
+    // =======================================================================
+
+    #[cfg(feature = "in-memory")]
+    #[test]
+    fn test_compact_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_compact(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "in-memory"))]
+    #[tokio::test]
+    async fn test_async_compact_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_compact(&db).await;
+    }
+
+    // --- RedbDB
+
+    #[cfg(feature = "redb")]
+    #[test]
+    fn test_compact_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_compact(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "redb"))]
+    #[tokio::test]
+    async fn test_async_compact_redb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_async_redb");
+        let db = keyvalue::redb::RedbDB::open(&path).unwrap();
+        common::test_async_compact(&db).await;
+    }
+
+    // --- FjallDB
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_compact_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_compact(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "fjall"))]
+    #[tokio::test]
+    async fn test_async_compact_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_async_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_async_compact(&db).await;
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_compact_gives_space_back_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_space_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        // fjall keeps a keyspace's table files in its `tables` directory.
+        let in_tables = |file: &std::path::Path| {
+            file.parent()
+                .is_some_and(|directory| directory.ends_with("tables"))
+        };
+        common::test_compact_gives_space_back(&db, &|| common::file_bytes(&path, &in_tables));
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_compact_does_not_pile_up_copies_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_copies_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        let in_tables = |file: &std::path::Path| {
+            file.parent()
+                .is_some_and(|directory| directory.ends_with("tables"))
+        };
+        common::test_compact_does_not_pile_up_copies(&db, &|| {
+            common::file_bytes(&path, &in_tables)
+        });
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_compact_keeps_at_most_one_replaced_copy_of_a_lone_table_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_lone_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        let in_tables = |file: &std::path::Path| {
+            file.parent()
+                .is_some_and(|directory| directory.ends_with("tables"))
+        };
+        common::test_compact_keeps_at_most_one_replaced_copy_of_a_lone_table(&db, &|| {
+            common::file_bytes(&path, &in_tables)
+        });
+    }
+
+    #[cfg(feature = "fjall")]
+    #[test]
+    fn test_compact_keeps_concurrent_writes_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_writes_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_compact_keeps_concurrent_writes(&db);
+    }
+
+    #[cfg(all(feature = "transactional", feature = "fjall"))]
+    #[test]
+    fn test_compact_keeps_what_a_read_transaction_reads_fjall() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_read_fjall");
+        let db = keyvalue::fjall::FjallDB::open(&path).unwrap();
+        common::test_compact_keeps_what_a_read_transaction_reads(&db);
+    }
+
+    // --- RocksDB
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_compact_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_compact(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "rocksdb"))]
+    #[tokio::test]
+    async fn test_async_compact_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_async_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_async_compact(&db).await;
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_compact_gives_space_back_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_space_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        // RocksDB keeps its entries in `.sst` files.
+        let is_table =
+            |file: &std::path::Path| file.extension().is_some_and(|extension| extension == "sst");
+        common::test_compact_gives_space_back(&db, &|| common::file_bytes(&path, &is_table));
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_compact_does_not_pile_up_copies_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_copies_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        let is_table =
+            |file: &std::path::Path| file.extension().is_some_and(|extension| extension == "sst");
+        common::test_compact_does_not_pile_up_copies(&db, &|| common::file_bytes(&path, &is_table));
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_compact_keeps_at_most_one_replaced_copy_of_a_lone_table_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_lone_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        let is_table =
+            |file: &std::path::Path| file.extension().is_some_and(|extension| extension == "sst");
+        common::test_compact_keeps_at_most_one_replaced_copy_of_a_lone_table(&db, &|| {
+            common::file_bytes(&path, &is_table)
+        });
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn test_compact_keeps_concurrent_writes_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_writes_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_compact_keeps_concurrent_writes(&db);
+    }
+
+    #[cfg(all(feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_compact_keeps_what_a_read_transaction_reads_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_read_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        common::test_compact_keeps_what_a_read_transaction_reads(&db);
+    }
+
+    #[cfg(all(feature = "transactional", feature = "rocksdb"))]
+    #[test]
+    fn test_compact_rewrites_the_last_level_a_closed_read_transaction_kept_rocksdb() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_last_level_rocks");
+        let db = keyvalue::rocksdb::RocksDB::open(&path).unwrap();
+        let is_table =
+            |file: &std::path::Path| file.extension().is_some_and(|extension| extension == "sst");
+        common::test_compact_rewrites_the_last_level_a_closed_read_transaction_kept(&db, &|| {
+            common::file_bytes(&path, &is_table)
+        });
+    }
+
+    // --- SqliteDB (async only)
+
+    #[cfg(all(feature = "async", feature = "sqlite"))]
+    #[tokio::test]
+    async fn test_async_compact_sqlite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("cp_sqlite");
+        let db = keyvalue::sqlite::SqliteDB::open(&path).await.unwrap();
+        common::test_async_compact(&db).await;
     }
 
     // =======================================================================

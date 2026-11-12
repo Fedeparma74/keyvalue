@@ -259,6 +259,9 @@ impl crate::AsyncKeyValueDB for InMemoryDB {
     async fn clear(&self) -> Result<(), io::Error> {
         KeyValueDB::clear(self)
     }
+    async fn compact(&self) -> Result<(), io::Error> {
+        KeyValueDB::compact(self)
+    }
 }
 
 impl KeyValueDB for InMemoryDB {
@@ -363,6 +366,11 @@ impl KeyValueDB for InMemoryDB {
 
     fn clear(&self) -> Result<(), io::Error> {
         self.write()?.clear();
+        Ok(())
+    }
+
+    /// Does nothing: a removed or replaced entry leaves the map at once.
+    fn compact(&self) -> Result<(), io::Error> {
         Ok(())
     }
 }

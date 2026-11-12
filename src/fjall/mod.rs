@@ -9,12 +9,16 @@
 use std::{
     collections::HashSet,
     io,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use fjall::{
-    CompressionType as FjallCompressionUpstream, KeyspaceCreateOptions, Readable,
+    AbstractTree, CompressionType as FjallCompressionUpstream, KeyspaceCreateOptions, Readable,
     SingleWriterTxDatabase,
 };
 
@@ -227,6 +231,18 @@ impl FjallConfig {
     }
 }
 
+/// Whether fjall runs a database on one worker thread, from the count the
+/// config asks for and the CPUs the process may use when the database is
+/// opened (`None` when they cannot be read). fjall runs the count asked for;
+/// with none, it runs one worker for each CPU up to a cap above one, and one
+/// worker when the CPUs cannot be read.
+fn runs_one_worker_thread(configured: Option<usize>, cpus: Option<NonZeroUsize>) -> bool {
+    match configured {
+        Some(workers) => workers == 1,
+        None => cpus.is_none_or(|cpus| cpus.get() == 1),
+    }
+}
+
 /// Key-value database backed by [fjall](https://docs.rs/fjall).
 ///
 /// Each table maps to a fjall *keyspace*. Deletion is soft: all entries are
@@ -239,6 +255,9 @@ pub struct FjallDB {
     config: Arc<FjallConfig>,
     deleted_tables: Arc<RwLock<HashSet<String>>>,
     max_memtable_size: u64,
+    /// Whether fjall runs the open database on one worker thread, taken
+    /// when the database is opened and again when it is re-opened.
+    one_worker_thread: Arc<AtomicBool>,
     /// The live transactions, reported by [`FjallDB::stats`].
     #[cfg(all(feature = "stats", feature = "transactional"))]
     transactions: stats::TransactionRegistry,
@@ -256,10 +275,10 @@ pub(super) struct FjallDBGuard<'a>(
 impl FjallDBGuard<'_> {
     /// Clones the shared handle out of the guard.
     ///
-    /// Every clone keeps fjall's directory lock held, so a transaction that
-    /// holds one blocks [`FjallDB::try_recover_from_poison`] from re-opening
-    /// the path. That is why recovery counts the outstanding clones instead
-    /// of assuming the store is free.
+    /// Every clone keeps fjall's directory lock held, so a transaction or a
+    /// compaction that holds one blocks [`FjallDB::try_recover_from_poison`]
+    /// from re-opening the path. That is why recovery counts the
+    /// outstanding clones instead of assuming the store is free.
     pub(super) fn handle(&self) -> Arc<SingleWriterTxDatabase> {
         Arc::clone(
             self.0
@@ -289,7 +308,8 @@ impl FjallDB {
     /// Opens (or creates) a fjall database at `path` with custom
     /// [`FjallConfig`].
     pub fn open_with_config(path: &Path, config: FjallConfig) -> io::Result<Self> {
-        let inner = Arc::new(Self::build_database(path, &config)?);
+        let (database, one_worker_thread) = Self::build_database(path, &config)?;
+        let inner = Arc::new(database);
         let deleted = Arc::new(RwLock::new(HashSet::new()));
 
         // Load persisted deleted tables
@@ -301,14 +321,25 @@ impl FjallDB {
             config: Arc::new(config.clone()),
             deleted_tables: deleted,
             max_memtable_size: config.max_memtable_size,
+            one_worker_thread: Arc::new(AtomicBool::new(one_worker_thread)),
             #[cfg(all(feature = "stats", feature = "transactional"))]
             transactions: stats::TransactionRegistry::default(),
         })
     }
 
-    /// Builds a new `SingleWriterTxDatabase` from the given path and config.
-    fn build_database(path: &Path, config: &FjallConfig) -> io::Result<SingleWriterTxDatabase> {
-        let mut builder = SingleWriterTxDatabase::builder(path)
+    /// Builds a new `SingleWriterTxDatabase` from the given path and config,
+    /// with whether fjall runs it on one worker thread. The CPUs are read
+    /// where fjall reads them for its count: when the builder is made.
+    fn build_database(
+        path: &Path,
+        config: &FjallConfig,
+    ) -> io::Result<(SingleWriterTxDatabase, bool)> {
+        let builder = SingleWriterTxDatabase::builder(path);
+        let one_worker_thread = runs_one_worker_thread(
+            config.worker_threads,
+            std::thread::available_parallelism().ok(),
+        );
+        let mut builder = builder
             .cache_size(config.cache_size)
             .max_journaling_size(config.max_journaling_size)
             .journal_compression(config.journal_compression.into())
@@ -328,7 +359,8 @@ impl FjallDB {
             builder = builder.max_cached_files(Some(n));
         }
 
-        builder.open().map_err(io::Error::other)
+        let database = builder.open().map_err(io::Error::other)?;
+        Ok((database, one_worker_thread))
     }
 
     /// Loads persisted deleted-table markers from the internal `_meta_deleted`
@@ -376,17 +408,19 @@ impl FjallDB {
     /// a second `open()` against a path this process still holds fails with
     /// `Error::Locked`.
     ///
-    /// Every live transaction owns a handle clone, so recovery is only
-    /// possible while none is outstanding.  This method therefore checks
-    /// first and **refuses without touching the store** when it cannot
-    /// succeed — dropping the handle to find out would leave the database
-    /// absent for the rest of the process's life, since the dropped handle
-    /// cannot be rebuilt without the very `open()` that is failing.
+    /// Every live transaction owns a handle clone, and so does a compaction
+    /// while it runs, so recovery is only possible while none is
+    /// outstanding.  This method therefore checks first and **refuses
+    /// without touching the store** when it cannot succeed — dropping the
+    /// handle to find out would leave the database absent for the rest of
+    /// the process's life, since the dropped handle cannot be rebuilt
+    /// without the very `open()` that is failing.
     ///
     /// # Errors
     ///
-    /// [`io::ErrorKind::WouldBlock`] when transactions are still live: the
-    /// store is untouched and the caller may try again once they drain.
+    /// [`io::ErrorKind::WouldBlock`] when transactions or a compaction are
+    /// still live: the store is untouched and the caller may try again once
+    /// they are over.
     /// Any other error means the re-open itself failed (e.g. the underlying
     /// hardware issue has not been resolved yet).
     pub fn try_recover_from_poison(&self) -> io::Result<()> {
@@ -401,9 +435,10 @@ impl FjallDB {
             Err(e) => e.into_inner(),
         };
 
-        // Step 1: refuse while any transaction still holds a handle clone.
-        // The write lock above stops new ones being handed out, so this count
-        // cannot grow while the check and the teardown run.
+        // Step 1: refuse while any transaction or compaction still holds a
+        // handle clone. The write lock above stops new ones being handed
+        // out, so this count cannot grow while the check and the teardown
+        // run.
         if let Some(db) = inner_guard.as_ref() {
             let outstanding = Arc::strong_count(db) - 1;
             if outstanding > 0 {
@@ -411,7 +446,7 @@ impl FjallDB {
                     io::ErrorKind::WouldBlock,
                     format!(
                         "cannot re-open the fjall database while {outstanding} transaction(s) \
-                         still hold it; retry once they drain"
+                         or compaction(s) still hold it; retry once they are over"
                     ),
                 ));
             }
@@ -423,13 +458,17 @@ impl FjallDB {
 
         // Step 3: re-open the database.  This will fail if the underlying
         // issue (e.g. disk full) has not been resolved.
-        let new_db = Arc::new(Self::build_database(&self.path, &self.config)?);
+        let (new_db, one_worker_thread) = Self::build_database(&self.path, &self.config)?;
+        let new_db = Arc::new(new_db);
 
         // Step 4: reload deleted-table metadata from the fresh database.
         deleted_guard.clear();
         Self::load_deleted_tables_into(&new_db, &mut deleted_guard)?;
 
-        // Step 5: install the new database.
+        // Step 5: install the new database, with whether it runs one worker
+        // thread.
+        self.one_worker_thread
+            .store(one_worker_thread, Ordering::Release);
         *inner_guard = Some(new_db);
 
         Ok(())
@@ -951,6 +990,66 @@ impl KeyValueDB for FjallDB {
             .persist(fjall::PersistMode::SyncAll)
             .map_err(io::Error::other)
     }
+
+    /// Runs a major compaction on every keyspace, which merges its tables
+    /// into its last level and leaves out the removed entries and replaced
+    /// values they hold, then seals every memtable. It does not wait for
+    /// fjall to write the sealed memtables out: what they hold reaches
+    /// tables in the background, and a later call merges it.
+    ///
+    /// Sealing a memtable is also what makes fjall delete the files a
+    /// compaction replaced: at least those of every compaction but the one
+    /// that finished last. So the keyspaces are compacted from the largest
+    /// on disk to the smallest, and the files left for the next call are
+    /// the smallest keyspace's.
+    ///
+    /// When no memtable holds anything there is nothing to seal, and the
+    /// files a compaction replaced would stay, one more set at every call.
+    /// The call then does nothing.
+    ///
+    /// The handle is cloned for the duration, as a transaction's is, so
+    /// [`FjallDB::try_recover_from_poison`] refuses instead of closing a
+    /// database that is being compacted.
+    ///
+    /// On a database fjall runs with one worker thread, as taken when the
+    /// database was opened, the call does nothing. When a memtable of the
+    /// keyspace being merged is written out, fjall queues a compaction of
+    /// that keyspace, which waits for the merge to end. With one worker that
+    /// wait holds the only thread that rotates full memtables and writes
+    /// them out, so no memtable of the database would be written out until
+    /// the merge ended, and writes would pile up in memory. With more, fjall
+    /// keeps one worker for that. The answer is read once the handle is
+    /// held, when recovery can no longer re-open the database under it.
+    fn compact(&self) -> Result<(), io::Error> {
+        let db = self.inner()?.handle();
+        if self.one_worker_thread.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut keyspaces = Vec::new();
+        for name in db.list_keyspace_names() {
+            let keyspace = db
+                .keyspace(name.as_ref(), || self.ks_options())
+                .map_err(io::Error::other)?;
+            keyspaces.push(keyspace);
+        }
+        if keyspaces
+            .iter()
+            .all(|keyspace| keyspace.inner().tree.active_memtable().is_empty())
+        {
+            return Ok(());
+        }
+        keyspaces.sort_by_key(|keyspace| std::cmp::Reverse(keyspace.inner().disk_space()));
+        for keyspace in &keyspaces {
+            keyspace.inner().major_compact().map_err(io::Error::other)?;
+        }
+        for keyspace in &keyspaces {
+            keyspace
+                .inner()
+                .rotate_memtable()
+                .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1008,5 +1107,236 @@ mod flush_tests {
         let db = FjallDB::open(dir.path()).expect("open");
         KeyValueDB::flush(&db).expect("flush");
         KeyValueDB::flush(&db).expect("second flush");
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use std::sync::{Mutex, OnceLock, mpsc};
+    use std::thread::ThreadId;
+
+    use fjall::compaction::filter::{
+        CompactionFilter, CompactionFilterResult, Context, Factory, ItemAccessor, Verdict,
+    };
+
+    use super::*;
+
+    const TABLE: &str = "alpha";
+    const ROWS: usize = 100;
+
+    fn key(i: usize) -> String {
+        format!("key-{i:04}")
+    }
+
+    /// Writes [`ROWS`] rows to [`TABLE`] and to disk, then removes one,
+    /// which the table's memtable holds.
+    fn store_rows_and_remove_one(db: &FjallDB) {
+        for i in 0..ROWS {
+            KeyValueDB::insert(db, TABLE, &key(i), &[7u8; 64]).expect("insert");
+        }
+        KeyValueDB::flush(db).expect("flush");
+        KeyValueDB::remove(db, TABLE, &key(0)).expect("remove");
+    }
+
+    /// Whether the memtable of [`TABLE`] holds nothing, as after a seal.
+    fn memtable_is_empty(db: &FjallDB) -> bool {
+        let inner = db.inner().expect("inner");
+        let keyspace = inner.keyspace(TABLE, || db.ks_options()).expect("keyspace");
+        keyspace.inner().tree.active_memtable().is_empty()
+    }
+
+    /// `compact` on a database opened with `config` and holding a removal in
+    /// memory: whether the call sealed the memtable.
+    fn compact_seals(config: FjallConfig) -> bool {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = FjallDB::open_with_config(dir.path(), config).expect("open");
+        store_rows_and_remove_one(&db);
+        KeyValueDB::compact(&db).expect("compact");
+        assert_eq!(KeyValueDB::keys(&db, TABLE).expect("keys").len(), ROWS - 1);
+        memtable_is_empty(&db)
+    }
+
+    /// With one worker thread configured the call does nothing: the removal
+    /// stays in memory. With two it compacts and seals the memtable.
+    #[test]
+    fn compact_does_nothing_on_a_database_run_with_one_worker_thread() {
+        assert!(!compact_seals(FjallConfig::default().worker_threads(1)));
+        assert!(compact_seals(FjallConfig::default().worker_threads(2)));
+    }
+
+    /// With the count left to fjall, the call does nothing exactly when the
+    /// process may use one CPU, where fjall runs one worker. Under
+    /// `taskset -c 0` this is the one-CPU case.
+    #[test]
+    fn compact_with_the_worker_count_left_to_fjall_follows_the_cpus_it_may_use() {
+        let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+        assert_eq!(
+            compact_seals(FjallConfig::default()),
+            cpus > 1,
+            "{cpus} CPUs"
+        );
+    }
+
+    /// One worker thread when the config asks for one, or leaves the count
+    /// to fjall where the process may use one CPU or its CPUs cannot be read;
+    /// more than one for any other configured count, and for a count left
+    /// to fjall where the process may use more than one CPU.
+    #[test]
+    fn one_worker_thread_follows_the_configured_count_or_else_the_cpus() {
+        let cpus = NonZeroUsize::new;
+        assert!(runs_one_worker_thread(Some(1), cpus(32)));
+        assert!(runs_one_worker_thread(Some(1), None));
+        assert!(!runs_one_worker_thread(Some(2), cpus(1)));
+        assert!(!runs_one_worker_thread(Some(4), None));
+        assert!(runs_one_worker_thread(None, cpus(1)));
+        assert!(runs_one_worker_thread(None, None));
+        assert!(!runs_one_worker_thread(None, cpus(2)));
+        assert!(!runs_one_worker_thread(None, cpus(32)));
+    }
+
+    /// `try_recover_from_poison` takes the answer again for the database it
+    /// opens, in place of the one recorded before.
+    #[test]
+    fn recovery_takes_again_whether_the_database_runs_one_worker_thread() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = FjallDB::open_with_config(dir.path(), FjallConfig::default().worker_threads(2))
+            .expect("open");
+        db.one_worker_thread.store(true, Ordering::SeqCst);
+
+        db.try_recover_from_poison().expect("recovery");
+
+        store_rows_and_remove_one(&db);
+        KeyValueDB::compact(&db).expect("compact");
+        assert!(
+            memtable_is_empty(&db),
+            "a database run with two workers was not compacted after recovery"
+        );
+    }
+
+    /// What the compaction under test reports to the test.
+    enum Event {
+        /// It filters its first item, and waits to be released.
+        Holding,
+        /// It returned.
+        Returned(io::Result<()>),
+    }
+
+    /// Holds the first item that a compaction running on the thread
+    /// `holds_on` filters, until the test releases it.
+    struct HoldFirstItem {
+        holds_on: OnceLock<ThreadId>,
+        held: AtomicBool,
+        events: Mutex<mpsc::Sender<Event>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    struct HoldingFactory(Arc<HoldFirstItem>);
+
+    impl Factory for HoldingFactory {
+        fn name(&self) -> &str {
+            "hold-first-item"
+        }
+
+        fn make_filter(&self, _ctx: &Context) -> Box<dyn CompactionFilter> {
+            Box::new(HoldingFilter(self.0.clone()))
+        }
+    }
+
+    struct HoldingFilter(Arc<HoldFirstItem>);
+
+    impl CompactionFilter for HoldingFilter {
+        fn filter_item(
+            &mut self,
+            _item: ItemAccessor<'_>,
+            _ctx: &Context,
+        ) -> CompactionFilterResult {
+            let hold = &self.0;
+            if hold.holds_on.get() == Some(&std::thread::current().id())
+                && !hold.held.swap(true, Ordering::SeqCst)
+            {
+                hold.events.lock().unwrap().send(Event::Holding).unwrap();
+                hold.release.lock().unwrap().recv().unwrap();
+            }
+            Ok(Verdict::Keep)
+        }
+    }
+
+    /// Opens a database at `path`, with two workers, whose [`TABLE`] is
+    /// compacted through `hold`.
+    fn open_holding(path: &Path, hold: &Arc<HoldFirstItem>) -> FjallDB {
+        let config = FjallConfig::default().worker_threads(2);
+        let factory: Arc<dyn Factory> = Arc::new(HoldingFactory(hold.clone()));
+        let database = SingleWriterTxDatabase::builder(path)
+            .worker_threads(2)
+            .with_compaction_filter_factories(Arc::new(move |table: &str| {
+                (table == TABLE).then(|| factory.clone())
+            }))
+            .open()
+            .expect("open");
+        FjallDB {
+            inner: Arc::new(RwLock::new(Some(Arc::new(database)))),
+            path: Arc::new(path.to_path_buf()),
+            max_memtable_size: config.max_memtable_size,
+            config: Arc::new(config),
+            deleted_tables: Arc::new(RwLock::new(HashSet::new())),
+            one_worker_thread: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(feature = "stats", feature = "transactional"))]
+            transactions: stats::TransactionRegistry::default(),
+        }
+    }
+
+    /// `try_recover_from_poison` called while a compaction runs refuses with
+    /// `WouldBlock` at once. The compaction holds a handle of the database,
+    /// not its lock, so recovery neither waits for it nor closes the
+    /// database under it; once it has returned, recovery goes through.
+    #[test]
+    fn recovery_during_a_compaction_refuses_at_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (events, events_received) = mpsc::channel();
+        let (release, release_received) = mpsc::channel();
+        let hold = Arc::new(HoldFirstItem {
+            holds_on: OnceLock::new(),
+            held: AtomicBool::new(false),
+            events: Mutex::new(events.clone()),
+            release: Mutex::new(release_received),
+        });
+        let db = open_holding(dir.path(), &hold);
+        store_rows_and_remove_one(&db);
+
+        let (lock_free, recovery) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                hold.holds_on.set(std::thread::current().id()).unwrap();
+                let result = KeyValueDB::compact(&db);
+                events.send(Event::Returned(result)).unwrap();
+            });
+            match events_received.recv().unwrap() {
+                Event::Holding => {}
+                Event::Returned(result) => {
+                    panic!("the compaction returned {result:?} without filtering an item")
+                }
+            }
+            // Recovery takes the store's lock first: a compaction holding it
+            // would make recovery wait for it.
+            let lock_free = db.inner.try_write().is_ok();
+            let recovery = lock_free.then(|| db.try_recover_from_poison());
+            release.send(()).unwrap();
+            (lock_free, recovery)
+        });
+
+        assert!(
+            lock_free,
+            "the compaction holds the store's lock: recovery would wait for it"
+        );
+        let error = recovery
+            .unwrap()
+            .expect_err("recovery re-opened the database during a compaction");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        match events_received.recv().unwrap() {
+            Event::Returned(result) => result.expect("compact"),
+            Event::Holding => panic!("the compaction held a second item"),
+        }
+        db.try_recover_from_poison()
+            .expect("recovery once the compaction has returned");
+        assert_eq!(KeyValueDB::keys(&db, TABLE).expect("keys").len(), ROWS - 1);
     }
 }

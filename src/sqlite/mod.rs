@@ -933,4 +933,11 @@ impl AsyncKeyValueDB for SqliteDB {
         })
         .await
     }
+
+    /// Does nothing: the pages of removed and replaced rows are reused by
+    /// later writes. Returning them to the file system takes a `VACUUM`,
+    /// which turso runs in place only as an experimental feature.
+    async fn compact(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
 }

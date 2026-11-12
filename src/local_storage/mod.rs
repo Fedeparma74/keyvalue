@@ -276,6 +276,12 @@ impl KeyValueDB for LocalStorageDB {
 
         Ok(())
     }
+
+    /// Does nothing: the browser's storage keeps nothing of a removed or
+    /// replaced item.
+    fn compact(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(feature = "async")]
@@ -340,6 +346,9 @@ impl crate::AsyncKeyValueDB for LocalStorageDB {
     }
     async fn clear(&self) -> Result<(), io::Error> {
         KeyValueDB::clear(self)
+    }
+    async fn compact(&self) -> Result<(), io::Error> {
+        KeyValueDB::compact(self)
     }
 }
 

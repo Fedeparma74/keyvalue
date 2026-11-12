@@ -2505,3 +2505,492 @@ pub async fn test_async_transactional_keys_range<D: keyvalue::AsyncTransactional
     w.clear().await.unwrap();
     w.commit().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// compact — sync
+// ---------------------------------------------------------------------------
+
+const COMPACT_TABLES: [&str; 2] = ["compact_a", "compact_b"];
+const COMPACT_ROWS: usize = 60;
+
+fn compact_key(i: usize) -> String {
+    format!("key-{i:05}")
+}
+
+fn compact_first(i: usize) -> Vec<u8> {
+    format!("first-{i}").into_bytes()
+}
+
+fn compact_second(i: usize) -> Vec<u8> {
+    format!("second-{i}").into_bytes()
+}
+
+/// What the row `i` of the table at `table_index` holds once the compact
+/// tests have written every row, then removed every third row of the first
+/// table and replaced every third.
+fn compact_expected(table_index: usize, i: usize) -> Option<Vec<u8>> {
+    match (table_index, i % 3) {
+        (0, 0) => None,
+        (0, 1) => Some(compact_second(i)),
+        _ => Some(compact_first(i)),
+    }
+}
+
+/// The rows of the table at `table_index` after those writes, in key order.
+fn compact_expected_rows(table_index: usize) -> Vec<(String, Vec<u8>)> {
+    (0..COMPACT_ROWS)
+        .filter_map(|i| compact_expected(table_index, i).map(|value| (compact_key(i), value)))
+        .collect()
+}
+
+fn check_compact_rows<D: keyvalue::KeyValueDB>(db: &D) {
+    for (table_index, table) in COMPACT_TABLES.iter().enumerate() {
+        let mut stored = db.iter(table).unwrap();
+        stored.sort();
+        assert_eq!(stored, compact_expected_rows(table_index));
+        for i in 0..COMPACT_ROWS {
+            assert_eq!(
+                db.get(table, &compact_key(i)).unwrap(),
+                compact_expected(table_index, i)
+            );
+        }
+    }
+}
+
+/// Tests `compact` on any [`keyvalue::KeyValueDB`]: an empty database
+/// takes it, every entry reads back the same after it, removed entries stay
+/// removed, a second call changes nothing, and writes go on afterwards.
+///
+/// Assumes the database is **empty** on entry and cleans up after itself.
+pub fn test_compact<D: keyvalue::KeyValueDB>(db: &D) {
+    db.compact().unwrap();
+    assert!(db.table_names().unwrap().is_empty());
+
+    for table in COMPACT_TABLES {
+        for i in 0..COMPACT_ROWS {
+            db.insert(table, &compact_key(i), &compact_first(i))
+                .unwrap();
+        }
+    }
+    for i in 0..COMPACT_ROWS {
+        match i % 3 {
+            0 => {
+                db.remove(COMPACT_TABLES[0], &compact_key(i)).unwrap();
+            }
+            1 => {
+                db.insert(COMPACT_TABLES[0], &compact_key(i), &compact_second(i))
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+    check_compact_rows(db);
+
+    db.compact().unwrap();
+    check_compact_rows(db);
+
+    db.compact().unwrap();
+    check_compact_rows(db);
+
+    assert!(
+        db.insert(COMPACT_TABLES[0], &compact_key(0), &compact_second(0))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.remove(COMPACT_TABLES[0], &compact_key(0)).unwrap(),
+        Some(compact_second(0))
+    );
+    check_compact_rows(db);
+
+    db.clear().unwrap();
+    db.compact().unwrap();
+    assert!(db.table_names().unwrap().is_empty());
+}
+
+/// Bytes that no compressor shrinks, different for every `i`.
+#[cfg(not(target_arch = "wasm32"))]
+fn incompressible(i: usize) -> Vec<u8> {
+    let mut state = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut out = Vec::with_capacity(1024);
+    while out.len() < 1024 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out
+}
+
+/// The bytes of the files under `dir` that `counts` accepts.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn file_bytes(dir: &std::path::Path, counts: &dyn Fn(&std::path::Path) -> bool) -> u64 {
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            bytes += file_bytes(&path, counts);
+        } else if counts(&path) {
+            bytes += std::fs::metadata(&path).unwrap().len();
+        }
+    }
+    bytes
+}
+
+/// Rows of the big table the space tests write.
+#[cfg(not(target_arch = "wasm32"))]
+const BIG_ROWS: usize = 2_000;
+
+/// Writes the big table and a small one of one row, flushes both, and
+/// returns what `stored` then measures: the files that hold the entries.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_a_big_and_a_small_table<D: keyvalue::KeyValueDB>(db: &D, stored: &dyn Fn() -> u64) -> u64 {
+    for i in 0..BIG_ROWS {
+        db.insert("big", &compact_key(i), &incompressible(i))
+            .unwrap();
+    }
+    db.insert("small", "key", b"value").unwrap();
+    db.flush().unwrap();
+    stored()
+}
+
+/// Tests that `compact` gives disk space back over two calls, with nine
+/// rows in ten of a table removed while they are still in memory. The
+/// first call writes the removals out and leaves no second copy of the
+/// table on disk. The second, made with one more entry in memory, leaves
+/// less than half of what the full table took.
+///
+/// Assumes the database is **empty** on entry.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn test_compact_gives_space_back<D: keyvalue::KeyValueDB>(db: &D, stored: &dyn Fn() -> u64) {
+    let kept = |i: usize| i.is_multiple_of(10);
+    let full = store_a_big_and_a_small_table(db, stored);
+
+    for i in (0..BIG_ROWS).filter(|i| !kept(*i)) {
+        db.remove("big", &compact_key(i)).unwrap();
+    }
+    db.compact().unwrap();
+    db.flush().unwrap();
+    let after_one = stored();
+    assert!(
+        after_one <= full + full / 10,
+        "{after_one} bytes on disk after one call, {full} before the removals"
+    );
+
+    db.insert("small", "another key", b"value").unwrap();
+    db.compact().unwrap();
+    let after_two = stored();
+    assert!(
+        after_two < full / 2,
+        "{after_two} bytes on disk after two calls, {full} before the removals"
+    );
+    for i in 0..BIG_ROWS {
+        assert_eq!(
+            db.get("big", &compact_key(i)).unwrap(),
+            kept(i).then(|| incompressible(i))
+        );
+    }
+}
+
+/// Tests that calls of `compact` do not pile up copies of what is stored.
+/// Over rounds of removals, each followed by a call, the files measured by
+/// `stored` never take more than the full tables did; and calls made with
+/// nothing in memory leave them as they are.
+///
+/// Assumes the database is **empty** on entry.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn test_compact_does_not_pile_up_copies<D: keyvalue::KeyValueDB>(
+    db: &D,
+    stored: &dyn Fn() -> u64,
+) {
+    const ROUNDS: usize = 6;
+    const REMOVED_A_ROUND: usize = 100;
+    let full = store_a_big_and_a_small_table(db, stored);
+    let ceiling = full + full / 10;
+
+    for round in 0..ROUNDS {
+        for i in round * REMOVED_A_ROUND..(round + 1) * REMOVED_A_ROUND {
+            db.remove("big", &compact_key(i)).unwrap();
+        }
+        db.compact().unwrap();
+        let at_return = stored();
+        assert!(
+            at_return <= ceiling,
+            "round {round}: {at_return} bytes on disk, {full} with every row"
+        );
+        db.flush().unwrap();
+    }
+
+    let settled = stored();
+    for call in 0..3 {
+        db.compact().unwrap();
+        let after = stored();
+        assert!(
+            after <= settled + full / 100,
+            "call {call} with nothing in memory: {after} bytes on disk, {settled} before it"
+        );
+    }
+    for i in 0..BIG_ROWS {
+        assert_eq!(
+            db.get("big", &compact_key(i)).unwrap(),
+            (i >= ROUNDS * REMOVED_A_ROUND).then(|| incompressible(i))
+        );
+    }
+}
+
+/// Tests the same on a database of one table, where the files a call
+/// replaced may wait for the next call: over rounds of removals, each
+/// followed by a call, the files measured by `stored` never take more than
+/// twice what the full table did.
+///
+/// Assumes the database is **empty** on entry.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn test_compact_keeps_at_most_one_replaced_copy_of_a_lone_table<D: keyvalue::KeyValueDB>(
+    db: &D,
+    stored: &dyn Fn() -> u64,
+) {
+    const ROUNDS: usize = 6;
+    const REMOVED_A_ROUND: usize = 100;
+    for i in 0..BIG_ROWS {
+        db.insert("big", &compact_key(i), &incompressible(i))
+            .unwrap();
+    }
+    db.flush().unwrap();
+    let full = stored();
+    let ceiling = 2 * full + full / 10;
+
+    for round in 0..ROUNDS {
+        for i in round * REMOVED_A_ROUND..(round + 1) * REMOVED_A_ROUND {
+            db.remove("big", &compact_key(i)).unwrap();
+        }
+        db.compact().unwrap();
+        let at_return = stored();
+        assert!(
+            at_return <= ceiling,
+            "round {round}: {at_return} bytes on disk, {full} with every row"
+        );
+        db.flush().unwrap();
+    }
+
+    let settled = stored();
+    for call in 0..3 {
+        db.compact().unwrap();
+        let after = stored();
+        assert!(
+            after <= settled + full / 100,
+            "call {call} with nothing in memory: {after} bytes on disk, {settled} before it"
+        );
+    }
+}
+
+/// Tests that entries committed while `compact` runs are all kept: a
+/// second thread writes rows from before the call until after it returns.
+///
+/// Assumes the database is **empty** on entry.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn test_compact_keeps_concurrent_writes<D: keyvalue::KeyValueDB>(db: &D) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for i in 0..BIG_ROWS {
+        db.insert("big", &compact_key(i), &incompressible(i))
+            .unwrap();
+    }
+    for i in (0..BIG_ROWS).step_by(2) {
+        db.remove("big", &compact_key(i)).unwrap();
+    }
+
+    let stop = AtomicBool::new(false);
+    let (under_way, writer_under_way) = std::sync::mpsc::channel();
+    let written = std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let mut written = 0;
+            while !stop.load(Ordering::Relaxed) {
+                db.insert("late", &compact_key(written), &compact_first(written))
+                    .unwrap();
+                written += 1;
+                if written == 1 {
+                    under_way.send(()).unwrap();
+                }
+            }
+            written
+        });
+        writer_under_way.recv().unwrap();
+        db.compact().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap()
+    });
+
+    assert_eq!(db.keys("late").unwrap().len(), written);
+    for i in 0..written {
+        assert_eq!(
+            db.get("late", &compact_key(i)).unwrap(),
+            Some(compact_first(i))
+        );
+    }
+    for i in 0..BIG_ROWS {
+        assert_eq!(
+            db.get("big", &compact_key(i)).unwrap(),
+            (i % 2 == 1).then(|| incompressible(i))
+        );
+    }
+}
+
+/// Tests that a read transaction opened before entries are removed still
+/// reads them after two calls of `compact`, the second made once the
+/// removals are on disk and one more entry is in memory, while the
+/// database itself no longer reads them.
+///
+/// Assumes the database is **empty** on entry.
+#[cfg(all(feature = "transactional", not(target_arch = "wasm32")))]
+pub fn test_compact_keeps_what_a_read_transaction_reads<D>(db: &D)
+where
+    D: keyvalue::KeyValueDB + keyvalue::TransactionalKVDB,
+{
+    use keyvalue::KVReadTransaction;
+
+    for i in 0..COMPACT_ROWS {
+        db.insert("held", &compact_key(i), &compact_first(i))
+            .unwrap();
+    }
+    db.flush().unwrap();
+
+    let read = db.begin_read().unwrap();
+    for i in 0..COMPACT_ROWS {
+        db.remove("held", &compact_key(i)).unwrap();
+    }
+    db.compact().unwrap();
+    db.flush().unwrap();
+    db.insert("other", "key", b"value").unwrap();
+    db.compact().unwrap();
+
+    for i in 0..COMPACT_ROWS {
+        assert_eq!(
+            read.get("held", &compact_key(i)).unwrap(),
+            Some(compact_first(i))
+        );
+    }
+    assert_eq!(read.iter("held").unwrap().len(), COMPACT_ROWS);
+    drop(read);
+
+    for i in 0..COMPACT_ROWS {
+        assert!(db.get("held", &compact_key(i)).unwrap().is_none());
+    }
+}
+
+/// Tests that one call of `compact`, made once a read transaction that kept
+/// removed rows has closed, gives their space back. The rows and their
+/// removals reach the last level of the store together while the
+/// transaction keeps them, so the call has to rewrite that level. RocksDB
+/// does; other backends give that space back over later calls.
+///
+/// Assumes the database is **empty** on entry.
+#[cfg(all(
+    feature = "transactional",
+    feature = "rocksdb",
+    not(target_arch = "wasm32")
+))]
+pub fn test_compact_rewrites_the_last_level_a_closed_read_transaction_kept<D>(
+    db: &D,
+    stored: &dyn Fn() -> u64,
+) where
+    D: keyvalue::KeyValueDB + keyvalue::TransactionalKVDB,
+{
+    let kept = |i: usize| i.is_multiple_of(10);
+    for i in 0..BIG_ROWS {
+        db.insert("big", &compact_key(i), &incompressible(i))
+            .unwrap();
+    }
+    db.flush().unwrap();
+    db.compact().unwrap();
+    let full = stored();
+
+    let read = db.begin_read().unwrap();
+    for i in (0..BIG_ROWS).filter(|i| !kept(*i)) {
+        db.remove("big", &compact_key(i)).unwrap();
+    }
+    db.compact().unwrap();
+    drop(read);
+
+    db.compact().unwrap();
+    let after = stored();
+    assert!(
+        after < full / 2,
+        "{after} bytes on disk after the call, {full} before the removals"
+    );
+    for i in 0..BIG_ROWS {
+        assert_eq!(
+            db.get("big", &compact_key(i)).unwrap(),
+            kept(i).then(|| incompressible(i))
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// compact — async
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "async")]
+async fn check_async_compact_rows<D: keyvalue::AsyncKeyValueDB>(db: &D) {
+    for (table_index, table) in COMPACT_TABLES.iter().enumerate() {
+        let mut stored = db.iter(table).await.unwrap();
+        stored.sort();
+        assert_eq!(stored, compact_expected_rows(table_index));
+        for i in 0..COMPACT_ROWS {
+            assert_eq!(
+                db.get(table, &compact_key(i)).await.unwrap(),
+                compact_expected(table_index, i)
+            );
+        }
+    }
+}
+
+/// Async version of [`test_compact`].
+#[cfg(feature = "async")]
+pub async fn test_async_compact<D: keyvalue::AsyncKeyValueDB>(db: &D) {
+    db.compact().await.unwrap();
+    assert!(db.table_names().await.unwrap().is_empty());
+
+    for table in COMPACT_TABLES {
+        for i in 0..COMPACT_ROWS {
+            db.insert(table, &compact_key(i), &compact_first(i))
+                .await
+                .unwrap();
+        }
+    }
+    for i in 0..COMPACT_ROWS {
+        match i % 3 {
+            0 => {
+                db.remove(COMPACT_TABLES[0], &compact_key(i)).await.unwrap();
+            }
+            1 => {
+                db.insert(COMPACT_TABLES[0], &compact_key(i), &compact_second(i))
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+    check_async_compact_rows(db).await;
+
+    db.compact().await.unwrap();
+    check_async_compact_rows(db).await;
+
+    db.compact().await.unwrap();
+    check_async_compact_rows(db).await;
+
+    assert!(
+        db.insert(COMPACT_TABLES[0], &compact_key(0), &compact_second(0))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.remove(COMPACT_TABLES[0], &compact_key(0)).await.unwrap(),
+        Some(compact_second(0))
+    );
+    check_async_compact_rows(db).await;
+
+    db.clear().await.unwrap();
+    db.compact().await.unwrap();
+    assert!(db.table_names().await.unwrap().is_empty());
+}

@@ -10,9 +10,9 @@ use std::{
 };
 
 use rust_rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
-    DBRecoveryMode, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options,
-    WriteOptions,
+    BlockBasedOptions, BottommostLevelCompaction, Cache, ColumnFamilyDescriptor, CompactOptions,
+    DBCompactionStyle, DBCompressionType, DBRecoveryMode, DBWithThreadMode, Direction,
+    IteratorMode, MultiThreaded, Options, WriteOptions,
 };
 
 use crate::KeyValueDB;
@@ -1322,6 +1322,25 @@ impl KeyValueDB for RocksDB {
             }
         }
         db.flush_wal(true).map_err(io::Error::other)
+    }
+
+    /// Compacts every column family over its whole key range, the
+    /// bottommost level included: that is where RocksDB drops removed
+    /// entries and replaced values. RocksDB writes the memtables out first,
+    /// so what it holds in memory is given back by this call too. It
+    /// reports no outcome for a manual compaction.
+    fn compact(&self) -> Result<(), io::Error> {
+        let inner = self.inner()?;
+        let db = &*inner;
+
+        let mut options = CompactOptions::default();
+        options.set_bottommost_level_compaction(BottommostLevelCompaction::ForceOptimized);
+        for name in Rocks::list_cf(&self.opts, &self.path).map_err(io::Error::other)? {
+            if let Some(cf) = db.cf_handle(&name) {
+                db.compact_range_cf_opt(&cf, None::<&[u8]>, None::<&[u8]>, &options);
+            }
+        }
+        Ok(())
     }
 }
 

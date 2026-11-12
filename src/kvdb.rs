@@ -227,6 +227,28 @@ pub trait KeyValueDB: MaybeSendSync + 'static {
     fn flush(&self) -> Result<(), io::Error> {
         Ok(())
     }
+
+    /// Gives back the space held by removed and replaced entries that the
+    /// backend has already written to disk, as far as it can. What it
+    /// still holds of them in memory is given back by a later call, and a
+    /// backend may leave everything to a later call while it holds nothing
+    /// in memory.
+    ///
+    /// What can be read does not change: every entry reads back the same
+    /// before, during and after the call, and an open read transaction
+    /// keeps reading what it could read. The database stays in use while
+    /// this runs: reads and writes go on, and whatever they commit is kept.
+    /// The call returns when the backend has done what it can without
+    /// waiting, which may take as long as rewriting every stored entry.
+    /// What a read transaction opened before the call can still read is
+    /// kept, and so are the files the call replaced, a full copy of what it
+    /// rewrote, until that transaction closes; a later call, or the next
+    /// write the backend puts to disk, gives them back.
+    ///
+    /// A backend does nothing when it keeps nothing of a removed or
+    /// replaced entry, or cannot give its space back while the database is
+    /// in use.
+    fn compact(&self) -> Result<(), io::Error>;
 }
 
 #[cfg(test)]

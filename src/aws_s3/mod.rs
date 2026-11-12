@@ -507,4 +507,10 @@ impl AsyncKeyValueDB for AwsS3DB {
 
         Ok(result)
     }
+
+    /// Does nothing: a removed or replaced object is the bucket's to free,
+    /// and the client holds nothing of it.
+    async fn compact(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
 }

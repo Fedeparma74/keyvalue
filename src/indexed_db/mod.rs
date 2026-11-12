@@ -849,6 +849,12 @@ impl AsyncKeyValueDB for IndexedDB {
 
         Err(io::Error::other("Unexpected response type"))
     }
+
+    /// Does nothing: the browser reclaims removed and replaced records on
+    /// its own, and offers a page no call for it.
+    async fn compact(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn indexed_db_error_to_io_error<T>(e: indexed_db::Error<T>) -> io::Error

@@ -435,6 +435,14 @@ impl KeyValueDB for RedbDB {
 
         Ok(())
     }
+
+    /// Does nothing: redb reuses the pages of removed and replaced entries
+    /// for later writes and trims free pages at the end of its file on
+    /// commit. Its own compaction needs the database to itself, with no
+    /// transaction open, which a shared handle cannot give.
+    fn compact(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
 }
 
 fn storage_error_to_io_error(e: StorageError) -> io::Error {

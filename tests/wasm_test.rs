@@ -201,6 +201,46 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(feature = "in-memory")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn test_compact_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_compact(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "in-memory"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_compact_in_memory() {
+        let db = keyvalue::in_memory::InMemoryDB::new();
+        common::test_async_compact(&db).await;
+    }
+
+    #[cfg(feature = "local-storage")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn test_compact_local_storage() {
+        let db =
+            keyvalue::local_storage::LocalStorageDB::open("test_compact_local_storage_db").unwrap();
+        common::test_compact(&db);
+    }
+
+    #[cfg(all(feature = "async", feature = "local-storage"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_compact_local_storage() {
+        let db =
+            keyvalue::local_storage::LocalStorageDB::open("test_async_compact_local_storage_db")
+                .unwrap();
+        common::test_async_compact(&db).await;
+    }
+
+    #[cfg(all(feature = "async", feature = "indexed-db"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_compact_indexed_db() {
+        let db = keyvalue::indexed_db::IndexedDB::open("test_async_compact_indexed_db_db")
+            .await
+            .unwrap();
+        common::test_async_compact(&db).await;
+    }
+
     #[cfg(all(feature = "async", feature = "aws-s3"))]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn test_async_aws_s3() {
@@ -221,6 +261,7 @@ mod tests {
         .await
         .unwrap();
         common::test_async_db(&db).await;
+        common::test_async_compact(&db).await;
         common::persist_test_data_async(Box::new(db)).await;
         let db = keyvalue::aws_s3::AwsS3DB::open(&endpoint_url, &region, credentials, bucket_name)
             .await
