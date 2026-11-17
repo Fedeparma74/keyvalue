@@ -70,6 +70,8 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
         let table_name = table_name.to_string();
         let key = key.to_string();
         let get_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
+            let key = key.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -123,6 +125,7 @@ impl<'a> AsyncKVReadTransaction<'a> for ReadTransaction {
     async fn iter(&self, table_name: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
         let table_name = table_name.to_string();
         let iter_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -244,6 +247,7 @@ async fn read_all_keys(
 ) -> io::Result<Vec<String>> {
     let table_name = table_name.to_string();
     let keys_closure = move |db: Rc<RwLock<Database>>| {
+        let table_name = table_name.clone();
         async move {
             let db = db.read().await;
             let table_name = table_name.to_string();
@@ -317,6 +321,12 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         let name = self.name.clone();
         let version = self.version.clone();
         let get_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
+            let key = key.clone();
+            let operations = operations.clone();
+            let table_names = table_names.clone();
+            let name = name.clone();
+            let version = version.clone();
             async move {
                 let mut db = db.write().await;
 
@@ -470,6 +480,9 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         }
         table_names.insert(table_name.clone());
         let iter_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
+            let operations = operations.clone();
+            let table_names = table_names.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -563,7 +576,9 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         for (op_table_name, _) in &operations {
             table_names.insert(op_table_name.clone());
         }
-        let table_names_closure = |db: Rc<RwLock<Database>>| {
+        let table_names_closure = move |db: Rc<RwLock<Database>>| {
+            let operations = operations.clone();
+            let table_names = table_names.clone();
             async move {
                 let db = db.read().await;
                 let mut table_names_list = HashSet::new();
@@ -679,6 +694,9 @@ impl<'a> AsyncKVReadTransaction<'a> for WriteTransaction {
         table_names.insert(table_name_owned.clone());
 
         let keys_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name_owned = table_name_owned.clone();
+            let operations = operations.clone();
+            let table_names = table_names.clone();
             async move {
                 let db = db.read().await;
                 let collected = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -849,6 +867,9 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
         let name = self.name.clone();
         let version = self.version.clone();
         let commit_closure = move |db: Rc<RwLock<Database>>| {
+            let operations = operations.clone();
+            let name = name.clone();
+            let version = version.clone();
             async move {
                 let mut table_names = HashSet::new();
                 for (op_table_name, _) in &operations {
@@ -938,7 +959,9 @@ impl<'a> AsyncKVWriteTransaction<'a> for WriteTransaction {
                     Err(e) => Err(e),
                 };
 
-                if !deleted_tables.borrow().is_empty() {
+                // The tables were emptied in the transaction above, so their
+                // stores go only if it succeeded.
+                if res.is_ok() && !deleted_tables.borrow().is_empty() {
                     db.close();
 
                     let current = version.load(std::sync::atomic::Ordering::SeqCst);

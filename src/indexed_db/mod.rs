@@ -51,8 +51,11 @@ mod transactional;
 #[cfg(feature = "transactional")]
 pub use self::transactional::{ReadTransaction, WriteTransaction};
 
+/// A command run against the connection. It may run a second time, on a new
+/// connection, when the first run finds its connection gone, so each run works
+/// on its own copy of what it captured.
 type CommandRequestClosure = Box<
-    dyn FnOnce(
+    dyn Fn(
             Rc<RwLock<Database>>,
         ) -> Pin<Box<dyn Future<Output = Result<CommandResponse, std::io::Error>>>>
         + Send,
@@ -71,6 +74,8 @@ enum CommandResponse {
     Clear,
     Commit,
     Recover,
+    #[cfg(feature = "test-wasm")]
+    CloseConnection,
     Error(std::io::Error),
 }
 
@@ -105,16 +110,16 @@ pub struct IndexedDB {
     name: String,
     version: Arc<AtomicU32>,
     idb_dropper: Option<oneshot::Sender<()>>,
-    task_handle: wasmt::task::r#async::JoinHandle<()>,
     command_request_sender:
         UnboundedSender<(CommandRequestClosure, oneshot::Sender<CommandResponse>)>,
 }
 
 impl Drop for IndexedDB {
     fn drop(&mut self) {
-        // Close the database connection
+        // The task closes the database connection and ends. A command it is
+        // running finishes first, as a transaction must not be dropped while
+        // one of its requests is in flight.
         self.idb_dropper.take().map(|sender| sender.send(()).ok());
-        self.task_handle.abort();
     }
 }
 
@@ -129,6 +134,8 @@ impl IndexedDB {
         )>();
         let (idb_dropper, mut idb_dropper_receiver) = futures::channel::oneshot::channel::<()>();
 
+        let version = Arc::new(AtomicU32::new(0));
+        let task_version = version.clone();
         let db_name_clone = db_name.to_string();
         let idb_task = async move {
             let db_factory = match Factory::get() {
@@ -156,14 +163,23 @@ impl IndexedDB {
             loop {
                 futures::select! {
                     (command, command_response_sender) = command_receiver.select_next_some() => {
-                        match command(db.clone()).await {
-                            Ok(response) => {
-                                command_response_sender.send(response).ok();
+                        // A command that finds its connection or its transaction
+                        // gone runs once more on a new connection. Its failed
+                        // transaction committed nothing and every write it makes
+                        // is absolute, so the second run ends where a single
+                        // successful run would have.
+                        let response = match command(db.clone()).await {
+                            Err(e) if is_connection_lost(&e) => {
+                                match reopen(&db, &db_name_clone, &task_version).await {
+                                    Ok(()) => command(db.clone()).await,
+                                    Err(e) => Err(e),
+                                }
                             }
-                            Err(e) => {
-                                command_response_sender.send(CommandResponse::Error(e)).ok();
-                            }
-                        }
+                            response => response,
+                        };
+                        command_response_sender
+                            .send(response.unwrap_or_else(CommandResponse::Error))
+                            .ok();
                     }
                     _ = idb_dropper_receiver => {
                         db.read().await.close();
@@ -178,24 +194,24 @@ impl IndexedDB {
             target_feature = "bulk-memory",
             target_feature = "mutable-globals"
         ))]
-        let task_handle = wasmt::task::spawn(idb_task);
+        wasmt::task::spawn(idb_task);
 
         #[cfg(not(all(
             target_feature = "atomics",
             target_feature = "bulk-memory",
             target_feature = "mutable-globals"
         )))]
-        let task_handle = wasmt::task::spawn_local(idb_task);
+        wasmt::task::spawn_local(idb_task);
 
         let db_version = init_res_receiver
             .await
             .map_err(|_| io::Error::other("Failed to receive initialization response"))??;
+        version.store(db_version, std::sync::atomic::Ordering::SeqCst);
 
         Ok(Self {
             name: db_name.to_string(),
-            version: Arc::new(AtomicU32::new(db_version)),
+            version,
             idb_dropper: Some(idb_dropper),
-            task_handle,
             command_request_sender: command_sender,
         })
     }
@@ -212,21 +228,10 @@ impl IndexedDB {
         let version = self.version.clone();
 
         let recover_closure = move |db: Rc<RwLock<Database>>| {
+            let name = name.clone();
+            let version = version.clone();
             async move {
-                let mut db_guard = db.write().await;
-                db_guard.close();
-
-                let new_db = Factory::get()
-                    .map_err(indexed_db_error_to_io_error)?
-                    .open_latest_version(&name)
-                    .await
-                    .map_err(indexed_db_error_to_io_error)?;
-
-                let db_version = new_db.version();
-                version.store(db_version, std::sync::atomic::Ordering::SeqCst);
-
-                *db_guard = new_db;
-
+                reopen(&db, &name, &version).await?;
                 Ok::<_, std::io::Error>(CommandResponse::Recover)
             }
             .boxed_local()
@@ -247,6 +252,54 @@ impl IndexedDB {
             _ => Err(io::Error::other("Unexpected response type")),
         }
     }
+
+    /// Closes the connection under this database and leaves the closed
+    /// connection in place, so that the next command finds it gone.
+    #[cfg(feature = "test-wasm")]
+    #[doc(hidden)]
+    pub async fn close_connection(&self) -> io::Result<()> {
+        let close_closure = |db: Rc<RwLock<Database>>| {
+            async move {
+                db.read().await.close();
+                Ok::<_, std::io::Error>(CommandResponse::CloseConnection)
+            }
+            .boxed_local()
+        };
+
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.command_request_sender
+            .unbounded_send((Box::new(close_closure), response_sender))
+            .map_err(|_| io::Error::other("Failed to send command request"))?;
+
+        let response = response_receiver
+            .await
+            .map_err(|_| io::Error::other("Failed to receive command response"))?;
+
+        match response {
+            CommandResponse::CloseConnection => Ok(()),
+            CommandResponse::Error(e) => Err(e),
+            _ => Err(io::Error::other("Unexpected response type")),
+        }
+    }
+}
+
+/// Closes the connection and opens the database again at its latest version.
+async fn reopen(db: &RwLock<Database>, name: &str, version: &AtomicU32) -> io::Result<()> {
+    let mut db_guard = db.write().await;
+    db_guard.close();
+
+    let new_db = Factory::get()
+        .map_err(indexed_db_error_to_io_error)?
+        .open_latest_version(name)
+        .await
+        .map_err(indexed_db_error_to_io_error)?;
+
+    let db_version = new_db.version();
+    version.store(db_version, std::sync::atomic::Ordering::SeqCst);
+
+    *db_guard = new_db;
+
+    Ok(())
 }
 
 #[async_trait(?Send)]
@@ -265,6 +318,11 @@ impl AsyncKeyValueDB for IndexedDB {
         let key = key.to_string();
         let value = value.to_vec();
         let insert_closure = move |db: Rc<RwLock<Database>>| {
+            let name = name.clone();
+            let version = version.clone();
+            let table_name = table_name.clone();
+            let key = key.clone();
+            let value = value.clone();
             async move {
                 let mut db = db.write().await;
                 if !db.object_store_names().into_iter().any(|n| n == table_name) {
@@ -338,6 +396,8 @@ impl AsyncKeyValueDB for IndexedDB {
         let table_name = table_name.to_string();
         let key = key.to_string();
         let get_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
+            let key = key.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -396,6 +456,11 @@ impl AsyncKeyValueDB for IndexedDB {
             let key = key.to_string();
 
             let remove_closure = move |db: Rc<RwLock<Database>>| {
+                let name = name.clone();
+                let version = version.clone();
+                let table_name = table_name.clone();
+                let key = key.clone();
+                let old_value = old_value.clone();
                 async move {
                     let mut db = db.write().await;
                     if !db.object_store_names().into_iter().any(|n| n == table_name) {
@@ -489,6 +554,7 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn iter(&self, table_name: &str) -> Result<Vec<(String, Vec<u8>)>, io::Error> {
         let table_name = table_name.to_string();
         let iter_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -578,6 +644,9 @@ impl AsyncKeyValueDB for IndexedDB {
         let version = self.version.clone();
         let table_name = table_name.to_string();
         let delete_table_closure = move |db: Rc<RwLock<Database>>| {
+            let name = name.clone();
+            let version = version.clone();
+            let table_name = table_name.clone();
             async move {
                 let mut db = db.write().await;
                 if db.object_store_names().into_iter().any(|n| n == table_name) {
@@ -633,6 +702,8 @@ impl AsyncKeyValueDB for IndexedDB {
         let table_name = table_name.to_string();
         let key = key.to_string();
         let contains_key_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
+            let key = key.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -684,6 +755,7 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn keys(&self, table_name: &str) -> Result<Vec<String>, io::Error> {
         let table_name = table_name.to_string();
         let keys_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -753,6 +825,7 @@ impl AsyncKeyValueDB for IndexedDB {
     async fn values(&self, table_name: &str) -> Result<Vec<Vec<u8>>, io::Error> {
         let table_name = table_name.to_string();
         let values_closure = move |db: Rc<RwLock<Database>>| {
+            let table_name = table_name.clone();
             async move {
                 let db = db.read().await;
                 let table_name = table_name.to_string();
@@ -808,6 +881,8 @@ impl AsyncKeyValueDB for IndexedDB {
         let name = self.name.clone();
         let version = self.version.clone();
         let clear_closure = move |db: Rc<RwLock<Database>>| {
+            let name = name.clone();
+            let version = version.clone();
             async move {
                 let mut db = db.write().await;
                 db.close();
@@ -857,6 +932,23 @@ impl AsyncKeyValueDB for IndexedDB {
     }
 }
 
+/// Marks an error after which neither the connection nor the transaction the
+/// command ran in can be used again.
+#[derive(Debug)]
+struct ConnectionLost(String);
+
+impl std::fmt::Display for ConnectionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConnectionLost {}
+
+fn is_connection_lost(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|e| e.is::<ConnectionLost>())
+}
+
 fn indexed_db_error_to_io_error<T>(e: indexed_db::Error<T>) -> io::Error
 where
     T: std::fmt::Debug,
@@ -868,8 +960,23 @@ where
         indexed_db::Error::AlreadyExists => {
             io::Error::new(io::ErrorKind::AlreadyExists, format!("{:?}", e))
         }
-        indexed_db::Error::DatabaseIsClosed => {
-            io::Error::new(io::ErrorKind::NotConnected, format!("{:?}", e))
+        indexed_db::Error::DatabaseIsClosed => io::Error::new(
+            io::ErrorKind::NotConnected,
+            ConnectionLost(format!("{:?}", e)),
+        ),
+        // `ObjectStoreWasRemoved` is what a store request's InvalidStateError
+        // becomes. The commands' own aborts end with the error that made them
+        // (`ReadOnly` on the read paths), so an abort reaching this point is one
+        // the browser made.
+        indexed_db::Error::Unknown
+        | indexed_db::Error::InvalidState
+        | indexed_db::Error::TransactionInactive
+        | indexed_db::Error::TransactionAborted
+        | indexed_db::Error::ObjectStoreWasRemoved => {
+            io::Error::other(ConnectionLost(format!("{:?}", e)))
+        }
+        indexed_db::Error::QuotaExceeded => {
+            io::Error::new(io::ErrorKind::QuotaExceeded, format!("{:?}", e))
         }
         indexed_db::Error::InvalidArgument
         | indexed_db::Error::InvalidKey
@@ -886,8 +993,8 @@ where
         indexed_db::Error::FailedClone
         | indexed_db::Error::IndexedDbDisabled
         | indexed_db::Error::NotInBrowser
-        | indexed_db::Error::ObjectStoreWasRemoved
         | indexed_db::Error::OperationNotSupported
+        | indexed_db::Error::Other { .. }
         | indexed_db::Error::User(_) => io::Error::other(format!("{:?}", e)),
         e => io::Error::other(format!("{:?}", e)),
     }

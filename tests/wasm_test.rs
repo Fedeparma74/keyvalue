@@ -166,6 +166,76 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "async", feature = "transactional", feature = "indexed-db"))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_async_indexed_db_reopens_a_lost_connection() {
+        use futures::future::join;
+        use keyvalue::{AsyncKVWriteTransaction, AsyncKeyValueDB, AsyncTransactionalKVDB};
+
+        let name = "test_async_indexed_db_reopens_a_lost_connection_db";
+        let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
+        AsyncKeyValueDB::insert(&db, "table", "a", b"1")
+            .await
+            .unwrap();
+        AsyncKeyValueDB::insert(&db, "table", "b", b"2")
+            .await
+            .unwrap();
+
+        db.close_connection().await.unwrap();
+        assert_eq!(
+            AsyncKeyValueDB::get(&db, "table", "a").await.unwrap(),
+            Some(b"1".to_vec())
+        );
+
+        // `insert` and `remove` read the old value before they write, and the
+        // connection is closed between that read and the write.
+        let (old_value, closed) = join(
+            AsyncKeyValueDB::insert(&db, "table", "c", b"3"),
+            db.close_connection(),
+        )
+        .await;
+        closed.unwrap();
+        assert_eq!(old_value.unwrap(), None);
+
+        let (old_value, closed) = join(
+            AsyncKeyValueDB::remove(&db, "table", "b"),
+            db.close_connection(),
+        )
+        .await;
+        closed.unwrap();
+        assert_eq!(old_value.unwrap(), Some(b"2".to_vec()));
+
+        db.close_connection().await.unwrap();
+        assert_eq!(
+            AsyncKeyValueDB::iter(&db, "table").await.unwrap(),
+            vec![
+                ("a".to_string(), b"1".to_vec()),
+                ("c".to_string(), b"3".to_vec())
+            ]
+        );
+
+        let mut write = AsyncTransactionalKVDB::begin_write(&db).await.unwrap();
+        AsyncKVWriteTransaction::insert(&mut write, "table", "d", b"4")
+            .await
+            .unwrap();
+        AsyncKVWriteTransaction::remove(&mut write, "table", "a")
+            .await
+            .unwrap();
+        db.close_connection().await.unwrap();
+        AsyncKVWriteTransaction::commit(write).await.unwrap();
+
+        drop(db);
+        let db = keyvalue::indexed_db::IndexedDB::open(name).await.unwrap();
+        assert_eq!(
+            AsyncKeyValueDB::iter(&db, "table").await.unwrap(),
+            vec![
+                ("c".to_string(), b"3".to_vec()),
+                ("d".to_string(), b"4".to_vec())
+            ]
+        );
+        AsyncKeyValueDB::clear(&db).await.unwrap();
+    }
+
     #[cfg(all(
         feature = "async",
         feature = "indexed-db",

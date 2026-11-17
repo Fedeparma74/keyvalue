@@ -45,7 +45,7 @@ tokio = { version = "1", default-features = false, features = [
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-storage = { version = "0.4", optional = true }
-indexed-db = { version = "0.5.0-alpha.1", optional = true }
+indexed-db = { git = "https://github.com/Fedeparma74/indexed-db", rev = "88d0e7440ef57deb7e0dc4a4982cedff12d4604f", optional = true }
 js-sys = { version = "0.3", optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 gloo-timers = { version = "0.4", features = ["futures"], optional = true }

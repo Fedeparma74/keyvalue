@@ -39,7 +39,8 @@
 //! let db = InMemoryDB::new();
 //! db.insert("users", "alice", b"data").unwrap();
 //! assert_eq!(db.get("users", "alice").unwrap(), Some(b"data".to_vec()));
-//! ```//!
+//! ```
+//!
 //! ## WASM support
 //!
 //! The following backends work on `wasm32-unknown-unknown`:
